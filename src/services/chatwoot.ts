@@ -105,7 +105,20 @@ export async function updateContact(
   contactId: number,
   payload: ChatwootContactPayload,
 ): Promise<void> {
-  await chatwootClient.put(`/contacts/${contactId}`, payload);
+  try {
+    await chatwootClient.put(`/contacts/${contactId}`, payload);
+  } catch (err) {
+    if (err instanceof AxiosError && err.response?.status === 422 && payload.phone_number) {
+      logger.warn('Update returned 422, retrying without phone_number', {
+        contactId,
+        detail: extractErrorDetail(err),
+      });
+      const { phone_number: _, ...withoutPhone } = payload;
+      await chatwootClient.put(`/contacts/${contactId}`, withoutPhone);
+      return;
+    }
+    throw err;
+  }
 }
 
 /**
