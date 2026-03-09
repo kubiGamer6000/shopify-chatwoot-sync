@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
-import { fetchCustomerOrders, fetchOrder } from '../services/shopify.js';
+import { fetchCustomerOrders } from '../services/shopify.js';
 import { upsertContact } from '../services/chatwoot.js';
 import { buildCustomAttributes } from '../utils/formatters.js';
-import type { ShopifyCustomer, ShopifyOrder, ShopifyFulfillment, ChatwootContactPayload } from '../types/index.js';
+import type { ShopifyCustomer, ShopifyOrder, ChatwootContactPayload } from '../types/index.js';
 
 const router = Router();
 
@@ -46,7 +46,10 @@ router.post('/customers', async (req: Request, res: Response) => {
   }
 });
 
-// --- Order Created / Updated ---
+// --- Order Created / Updated / Fulfilled / Partially Fulfilled ---
+// All order-level webhooks (orders/create, orders/updated, orders/fulfilled,
+// orders/partially_fulfilled) deliver the same Order payload including the
+// fulfillments array with tracking numbers and URLs.
 router.post('/orders', async (req: Request, res: Response) => {
   try {
     const order = parseBody(req) as ShopifyOrder;
@@ -64,42 +67,6 @@ router.post('/orders', async (req: Request, res: Response) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('Order webhook error', { error: message });
-    res.status(500).send('Error');
-  }
-});
-
-// --- Fulfillment Created / Updated ---
-interface FulfillmentWebhookPayload extends ShopifyFulfillment {
-  order_id: number;
-}
-
-router.post('/fulfillments', async (req: Request, res: Response) => {
-  try {
-    const fulfillment = parseBody(req) as FulfillmentWebhookPayload;
-    logger.info('Received fulfillment webhook', {
-      fulfillmentId: fulfillment.id,
-      orderId: fulfillment.order_id,
-    });
-
-    if (!fulfillment.order_id) {
-      logger.warn('Fulfillment webhook has no order_id, skipping');
-      res.status(200).send('No order_id, skipped');
-      return;
-    }
-
-    const order = await fetchOrder(fulfillment.order_id);
-    const customer = order.customer;
-    if (!customer?.id) {
-      logger.warn('Fulfillment order has no customer, skipping', { orderId: order.id });
-      res.status(200).send('No customer, skipped');
-      return;
-    }
-
-    await syncCustomerToChatwoot(customer);
-    res.status(200).send('OK');
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error('Fulfillment webhook error', { error: message });
     res.status(500).send('Error');
   }
 });

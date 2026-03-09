@@ -20,7 +20,7 @@ export function verifyShopifyWebhook(req: Request, res: Response, next: NextFunc
   }
 
   const computed = crypto
-    .createHmac('sha256', env.shopifyWebhookSecret)
+    .createHmac('sha256', env.shopifyClientSecret)
     .update(body)
     .digest('base64');
 

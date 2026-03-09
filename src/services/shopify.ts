@@ -1,16 +1,21 @@
 import axios, { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { getAccessToken } from './shopifyAuth.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 
-const API_VERSION = '2025-01';
+const API_VERSION = '2026-01';
 
 const shopifyClient = axios.create({
   baseURL: `https://${env.shopifyStoreDomain}/admin/api/${API_VERSION}`,
-  headers: {
-    'Content-Type': 'application/json',
-    'X-Shopify-Access-Token': env.shopifyAccessToken,
-  },
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// Inject a fresh access token into every request
+shopifyClient.interceptors.request.use(async (config) => {
+  const token = await getAccessToken();
+  config.headers['X-Shopify-Access-Token'] = token;
+  return config;
 });
 
 async function withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {

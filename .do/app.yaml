@@ -26,10 +26,10 @@ services:
       - key: SHOPIFY_STORE_DOMAIN
         scope: RUN_AND_BUILD_TIME
         type: SECRET
-      - key: SHOPIFY_ACCESS_TOKEN
+      - key: SHOPIFY_CLIENT_ID
         scope: RUN_AND_BUILD_TIME
         type: SECRET
-      - key: SHOPIFY_WEBHOOK_SECRET
+      - key: SHOPIFY_CLIENT_SECRET
         scope: RUN_AND_BUILD_TIME
         type: SECRET
       - key: CHATWOOT_BASE_URL
