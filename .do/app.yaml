@@ -1,0 +1,46 @@
+spec_version: 2
+name: shopify-chatwoot-sync
+
+services:
+  - name: web
+    github:
+      repo: YOUR_GITHUB_USERNAME/YOUR_REPO_NAME
+      branch: main
+      deploy_on_push: true
+
+    environment_slug: node-js
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+
+    http_port: 8080
+
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+
+    envs:
+      - key: SHOPIFY_STORE_DOMAIN
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: SHOPIFY_ACCESS_TOKEN
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: SHOPIFY_WEBHOOK_SECRET
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: CHATWOOT_BASE_URL
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: CHATWOOT_API_TOKEN
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: CHATWOOT_ACCOUNT_ID
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: SYNC_API_KEY
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
