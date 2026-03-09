@@ -1,5 +1,10 @@
 import { fetchCustomersPage, fetchCustomerOrders, sleep } from './shopify.js';
-import { upsertContact } from './chatwoot.js';
+import {
+  findByIdentifier,
+  findByEmail,
+  contactHasShopifyData,
+  upsertContact,
+} from './chatwoot.js';
 import { buildCustomAttributes, toE164 } from '../utils/formatters.js';
 import { logger } from '../utils/logger.js';
 import type { ChatwootContactPayload } from '../types/index.js';
@@ -19,13 +24,14 @@ export interface SyncResult {
 }
 
 /**
- * Paginates through all Shopify customers, fetches their orders,
- * and upserts each one into Chatwoot.
+ * Paginates through all Shopify customers and fills gaps in Chatwoot:
  *
- * - Matches existing contacts by identifier (Shopify ID) first,
- *   then by email as fallback for pre-existing contacts.
- * - Creates new contacts if CHATWOOT_INBOX_ID is configured.
- * - Never throws — individual customer failures are logged and counted.
+ * - Contact exists with Shopify data already populated → skip (webhooks keep it fresh)
+ * - Contact exists but has no Shopify data → populate it
+ * - Contact doesn't exist → create it (if CHATWOOT_INBOX_ID is set)
+ *
+ * This keeps the periodic sync lightweight — only new/unpopulated
+ * contacts trigger Shopify order fetches and Chatwoot writes.
  */
 export async function runFullSync(): Promise<SyncResult> {
   if (syncInProgress) {
@@ -49,16 +55,25 @@ export async function runFullSync(): Promise<SyncResult> {
         result.totalProcessed++;
 
         try {
-          if (!customer.id) {
+          if (!customer.id || !customer.email) {
             result.skipped++;
             continue;
           }
 
-          if (!customer.email) {
+          const identifier = String(customer.id);
+
+          // Check if contact already exists and has Shopify data
+          let existing = await findByIdentifier(identifier);
+          if (!existing) {
+            existing = await findByEmail(customer.email);
+          }
+
+          if (existing && contactHasShopifyData(existing)) {
             result.skipped++;
             continue;
           }
 
+          // Contact is missing or needs Shopify data — fetch orders and upsert
           const orders = await fetchCustomerOrders(customer.id);
           const customAttrs = buildCustomAttributes(customer, orders);
 
@@ -66,11 +81,11 @@ export async function runFullSync(): Promise<SyncResult> {
             name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || undefined,
             email: customer.email,
             phone_number: toE164(customer.phone) || toE164(customer.default_address?.phone),
-            identifier: String(customer.id),
+            identifier,
             custom_attributes: customAttrs,
           };
 
-          const { action } = await upsertContact(String(customer.id), payload);
+          const { action } = await upsertContact(identifier, payload);
           if (action === 'created') result.created++;
           else if (action === 'updated') result.updated++;
           else result.skipped++;
@@ -113,7 +128,6 @@ export function startPeriodicSync(intervalHours: number): void {
   const intervalMs = intervalHours * 60 * 60 * 1000;
   logger.info(`Periodic sync enabled: every ${intervalHours}h`);
 
-  // Run first sync after a short startup delay
   setTimeout(() => {
     void runFullSync().catch((err) => {
       logger.error('Periodic sync failed', {

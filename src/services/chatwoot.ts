@@ -73,14 +73,14 @@ async function filterContacts(filters: FilterPayloadItem[]): Promise<ChatwootCon
   return res.data.payload;
 }
 
-async function findByIdentifier(identifier: string): Promise<ChatwootContact | null> {
+export async function findByIdentifier(identifier: string): Promise<ChatwootContact | null> {
   const results = await filterContacts([
     { attribute_key: 'identifier', filter_operator: 'equal_to', values: [identifier] },
   ]);
   return results[0] ?? null;
 }
 
-async function findByEmail(email: string): Promise<ChatwootContact | null> {
+export async function findByEmail(email: string): Promise<ChatwootContact | null> {
   const results = await filterContacts([
     { attribute_key: 'email', filter_operator: 'equal_to', values: [email] },
   ]);
