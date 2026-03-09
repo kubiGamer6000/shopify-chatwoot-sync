@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import type {
@@ -15,24 +15,52 @@ const chatwootClient = axios.create({
   },
 });
 
-async function searchContacts(query: string): Promise<ChatwootContact[]> {
-  const res = await chatwootClient.get<ChatwootSearchResponse>('/contacts/search', {
-    params: { q: query },
+function extractErrorDetail(err: unknown): string {
+  if (err instanceof AxiosError && err.response) {
+    const data = err.response.data as Record<string, unknown> | undefined;
+    return `${err.response.status} ${JSON.stringify(data)}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+interface FilterPayloadItem {
+  attribute_key: string;
+  filter_operator: string;
+  values: string[];
+  query_operator?: string;
+}
+
+interface FilterResponse {
+  payload: ChatwootContact[];
+  meta?: { count: number; current_page: number };
+}
+
+/**
+ * Uses the /contacts/filter endpoint for exact matching.
+ * Much more reliable than /contacts/search which is fuzzy.
+ */
+async function filterContacts(filters: FilterPayloadItem[]): Promise<ChatwootContact[]> {
+  const res = await chatwootClient.post<FilterResponse>('/contacts/filter', {
+    payload: filters,
   });
   return res.data.payload;
 }
 
 async function findByIdentifier(identifier: string): Promise<ChatwootContact | null> {
-  const results = await searchContacts(identifier);
-  return results.find((c) => c.identifier === identifier) ?? null;
+  const results = await filterContacts([
+    { attribute_key: 'identifier', filter_operator: 'equal_to', values: [identifier] },
+  ]);
+  return results[0] ?? null;
 }
 
 async function findByEmail(email: string): Promise<ChatwootContact | null> {
-  const results = await searchContacts(email);
-  return results.find((c) => c.email?.toLowerCase() === email.toLowerCase()) ?? null;
+  const results = await filterContacts([
+    { attribute_key: 'email', filter_operator: 'equal_to', values: [email] },
+  ]);
+  return results[0] ?? null;
 }
 
-export async function createContact(
+async function tryCreate(
   payload: ChatwootContactPayload,
 ): Promise<ChatwootContact> {
   const body: Record<string, unknown> = { ...payload };
@@ -54,21 +82,19 @@ export async function updateContact(
 }
 
 /**
- * Smart upsert: finds existing contact by identifier OR email,
- * updates them, or creates a new one if no match is found.
+ * Smart upsert with exact-match filters and 422 retry.
  *
- * When an existing contact is matched by email (pre-existing contact
- * without Shopify data), we set their identifier to the Shopify
- * customer ID so future lookups are faster.
+ * 1. Filter by identifier (Shopify ID) — fast path for linked contacts.
+ * 2. Filter by email — catches pre-existing contacts.
+ * 3. Create new contact if no match.
+ * 4. If create returns 422 (duplicate), retry the email filter and update.
  */
 export async function upsertContact(
   identifier: string,
   payload: ChatwootContactPayload,
 ): Promise<{ action: 'created' | 'updated' | 'skipped'; contactId?: number }> {
-  // 1) Fast path: lookup by Shopify customer ID (identifier)
   let existing = await findByIdentifier(identifier);
 
-  // 2) Fallback: lookup by email (catches pre-existing contacts)
   if (!existing && payload.email) {
     existing = await findByEmail(payload.email);
     if (existing) {
@@ -86,7 +112,6 @@ export async function upsertContact(
     return { action: 'updated', contactId: existing.id };
   }
 
-  // 3) Create new contact (requires CHATWOOT_INBOX_ID)
   if (!env.chatwootInboxId) {
     logger.debug('Contact not found and CHATWOOT_INBOX_ID not set, skipping create', {
       identifier,
@@ -95,14 +120,51 @@ export async function upsertContact(
     return { action: 'skipped' };
   }
 
-  logger.info('Creating new Chatwoot contact', { identifier, email: payload.email });
-  const created = await createContact(payload);
-  return { action: 'created', contactId: created.id };
+  // Attempt to create — handle 422 (duplicate) gracefully
+  try {
+    logger.info('Creating new Chatwoot contact', { identifier, email: payload.email });
+    const created = await tryCreate(payload);
+    return { action: 'created', contactId: created.id };
+  } catch (err) {
+    if (err instanceof AxiosError && err.response?.status === 422 && payload.email) {
+      logger.warn('Create returned 422 (likely duplicate), retrying email lookup', {
+        identifier,
+        email: payload.email,
+        detail: extractErrorDetail(err),
+      });
+
+      const retryMatch = await findByEmail(payload.email);
+      if (retryMatch) {
+        await updateContact(retryMatch.id, payload);
+        return { action: 'updated', contactId: retryMatch.id };
+      }
+
+      // 422 but email filter still finds nothing — could be a phone conflict.
+      // Retry create without phone_number.
+      if (payload.phone_number) {
+        try {
+          const { phone_number: _, ...withoutPhone } = payload;
+          logger.warn('Retrying create without phone_number', { identifier });
+          const created = await tryCreate(withoutPhone);
+          return { action: 'created', contactId: created.id };
+        } catch (retryErr) {
+          logger.error('Create failed even without phone', {
+            identifier,
+            detail: extractErrorDetail(retryErr),
+          });
+          throw retryErr;
+        }
+      }
+    }
+
+    logger.error('Failed to create Chatwoot contact', {
+      identifier,
+      detail: extractErrorDetail(err),
+    });
+    throw err;
+  }
 }
 
-/**
- * Checks whether a contact already has Shopify data populated.
- */
 export function contactHasShopifyData(contact: ChatwootContact): boolean {
   const attrs = contact.custom_attributes;
   if (!attrs) return false;
