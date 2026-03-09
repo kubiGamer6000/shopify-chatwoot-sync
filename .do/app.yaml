@@ -41,6 +41,12 @@ services:
       - key: CHATWOOT_ACCOUNT_ID
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      - key: CHATWOOT_INBOX_ID
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
       - key: SYNC_API_KEY
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      - key: SYNC_INTERVAL_HOURS
+        scope: RUN_AND_BUILD_TIME
+        value: "6"

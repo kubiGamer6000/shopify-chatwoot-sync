@@ -22,6 +22,8 @@ export const env = {
   chatwootBaseUrl: process.env.CHATWOOT_BASE_URL!,
   chatwootApiToken: process.env.CHATWOOT_API_TOKEN!,
   chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID!,
+  chatwootInboxId: process.env.CHATWOOT_INBOX_ID || '',
   syncApiKey: process.env.SYNC_API_KEY || '',
+  syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS) || 0,
   port: Number(process.env.PORT) || 8080,
 };
