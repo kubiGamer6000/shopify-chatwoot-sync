@@ -106,9 +106,19 @@ export async function runFullSync(): Promise<SyncResult> {
     } while (nextUrl);
 
     logger.info('Sync completed', { ...result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error('Sync failed at page level', { error: message });
+  } catch (err: unknown) {
+    const detail: Record<string, unknown> = {};
+    if (err instanceof Error) detail.error = err.message;
+    else detail.error = String(err);
+    if (
+      typeof err === 'object' && err !== null && 'response' in err &&
+      typeof (err as Record<string, unknown>).response === 'object'
+    ) {
+      const res = (err as { response: { status?: number; config?: { url?: string } } }).response;
+      detail.status = res.status;
+      detail.url = res.config?.url;
+    }
+    logger.error('Sync failed at page level', detail);
   } finally {
     syncInProgress = false;
   }

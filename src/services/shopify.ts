@@ -86,9 +86,12 @@ export async function fetchCustomersPage(
   return { customers: res.data.customers, nextUrl };
 }
 
+const BASE_PATH = `/admin/api/${API_VERSION}`;
+
 /**
  * Parses the Link header for cursor-based pagination.
- * Returns the relative path of the `rel="next"` URL, or null.
+ * Shopify returns full URLs like https://store.myshopify.com/admin/api/2026-01/customers.json?page_info=xxx
+ * We strip the /admin/api/{version} prefix so the result is relative to the Axios baseURL.
  */
 function parsePaginationNext(linkHeader?: string): string | null {
   if (!linkHeader) return null;
@@ -99,7 +102,11 @@ function parsePaginationNext(linkHeader?: string): string | null {
     if (match?.[1]) {
       try {
         const fullUrl = new URL(match[1]);
-        return fullUrl.pathname + fullUrl.search;
+        const path = fullUrl.pathname;
+        const relative = path.startsWith(BASE_PATH)
+          ? path.slice(BASE_PATH.length)
+          : path;
+        return relative + fullUrl.search;
       } catch {
         return match[1];
       }
