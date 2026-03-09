@@ -7,12 +7,39 @@ import type {
   ChatwootSearchResponse,
 } from '../types/index.js';
 
+const MAX_RETRIES = 4;
+const BASE_DELAY_MS = 2000;
+
 const chatwootClient = axios.create({
   baseURL: `${env.chatwootBaseUrl}/api/v1/accounts/${env.chatwootAccountId}`,
   headers: {
     'Content-Type': 'application/json',
     api_access_token: env.chatwootApiToken,
   },
+});
+
+chatwootClient.interceptors.response.use(undefined, async (error: AxiosError) => {
+  const config = error.config;
+  if (!config || error.response?.status !== 429) throw error;
+
+  const retryCount = ((config as unknown as Record<string, unknown>).__retryCount as number) ?? 0;
+  if (retryCount >= MAX_RETRIES) throw error;
+
+  (config as unknown as Record<string, unknown>).__retryCount = retryCount + 1;
+
+  const retryAfter = error.response.headers['retry-after'];
+  const delayMs = retryAfter
+    ? Number(retryAfter) * 1000
+    : BASE_DELAY_MS * Math.pow(2, retryCount);
+
+  logger.warn('Chatwoot 429 rate limit, backing off', {
+    attempt: retryCount + 1,
+    delayMs,
+    url: config.url,
+  });
+
+  await new Promise((r) => setTimeout(r, delayMs));
+  return chatwootClient.request(config);
 });
 
 function extractErrorDetail(err: unknown): string {

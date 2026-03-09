@@ -8,6 +8,29 @@ import type {
 
 const SUBSCRIPTION_TAGS = ['subscription first order', 'subscription recurring order'];
 
+/**
+ * Normalizes a phone number to E.164 format for Chatwoot.
+ * Returns the cleaned number if valid, or undefined if it can't be normalized.
+ */
+export function toE164(phone: string | undefined | null): string | undefined {
+  if (!phone) return undefined;
+
+  // Strip everything except digits and leading +
+  let cleaned = phone.replace(/[^\d+]/g, '');
+
+  // If it doesn't start with +, add it (assume it already has country code)
+  if (!cleaned.startsWith('+')) {
+    cleaned = `+${cleaned}`;
+  }
+
+  // E.164: + followed by 7-15 digits
+  if (/^\+\d{7,15}$/.test(cleaned)) {
+    return cleaned;
+  }
+
+  return undefined;
+}
+
 export function countSubscriptionOrders(orders: ShopifyOrder[]): number {
   return orders.filter((order) => {
     if (!order.tags) return false;

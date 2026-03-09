@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
 import { fetchCustomerOrders } from '../services/shopify.js';
 import { upsertContact } from '../services/chatwoot.js';
-import { buildCustomAttributes } from '../utils/formatters.js';
+import { buildCustomAttributes, toE164 } from '../utils/formatters.js';
 import type { ShopifyCustomer, ShopifyOrder, ChatwootContactPayload } from '../types/index.js';
 
 const router = Router();
@@ -24,7 +24,7 @@ async function syncCustomerToChatwoot(customer: ShopifyCustomer): Promise<void> 
   const payload: ChatwootContactPayload = {
     name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || undefined,
     email: customer.email || undefined,
-    phone_number: customer.phone || customer.default_address?.phone || undefined,
+    phone_number: toE164(customer.phone) || toE164(customer.default_address?.phone),
     identifier: String(customer.id),
     custom_attributes: customAttrs,
   };

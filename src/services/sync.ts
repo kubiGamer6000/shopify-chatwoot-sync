@@ -1,6 +1,6 @@
 import { fetchCustomersPage, fetchCustomerOrders, sleep } from './shopify.js';
 import { upsertContact } from './chatwoot.js';
-import { buildCustomAttributes } from '../utils/formatters.js';
+import { buildCustomAttributes, toE164 } from '../utils/formatters.js';
 import { logger } from '../utils/logger.js';
 import type { ChatwootContactPayload } from '../types/index.js';
 
@@ -65,7 +65,7 @@ export async function runFullSync(): Promise<SyncResult> {
           const payload: ChatwootContactPayload = {
             name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || undefined,
             email: customer.email,
-            phone_number: customer.phone || customer.default_address?.phone || undefined,
+            phone_number: toE164(customer.phone) || toE164(customer.default_address?.phone),
             identifier: String(customer.id),
             custom_attributes: customAttrs,
           };
@@ -75,7 +75,7 @@ export async function runFullSync(): Promise<SyncResult> {
           else if (action === 'updated') result.updated++;
           else result.skipped++;
 
-          await sleep(300);
+          await sleep(500);
         } catch (err) {
           result.errors++;
           const message = err instanceof Error ? err.message : String(err);
