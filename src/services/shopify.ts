@@ -115,4 +115,15 @@ function parsePaginationNext(linkHeader?: string): string | null {
   return null;
 }
 
+export async function searchCustomerByEmail(
+  email: string,
+): Promise<ShopifyCustomer | null> {
+  const res = await withRetry(() =>
+    shopifyClient.get<{ customers: ShopifyCustomer[] }>(
+      `/customers/search.json?query=email:${encodeURIComponent(email)}`,
+    ),
+  );
+  return res.data.customers[0] ?? null;
+}
+
 export { sleep };

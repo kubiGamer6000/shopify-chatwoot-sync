@@ -4,6 +4,7 @@ import { syncAuth } from './middleware/syncAuth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import webhookRoutes from './routes/webhooks.js';
 import syncRoutes from './routes/sync.js';
+import chatwootWebhookRoutes from './routes/chatwootWebhook.js';
 
 const app = express();
 
@@ -23,6 +24,9 @@ app.use('/webhooks', verifyShopifyWebhook, webhookRoutes);
 
 // Sync routes (protected by SYNC_API_KEY when set)
 app.use('/sync', syncAuth, syncRoutes);
+
+// Chatwoot webhook for AI draft auto-reply
+app.use('/chatwoot', chatwootWebhookRoutes);
 
 // Global error handler
 app.use(errorHandler);

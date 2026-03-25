@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
 import { fetchCustomerOrders } from '../services/shopify.js';
 import { upsertContact } from '../services/chatwoot.js';
+import { registerTrackings } from '../services/tracking.js';
 import { buildCustomAttributes, toE164 } from '../utils/formatters.js';
 import type { ShopifyCustomer, ShopifyOrder, ChatwootContactPayload } from '../types/index.js';
 
@@ -63,6 +64,17 @@ router.post('/orders', async (req: Request, res: Response) => {
     }
 
     await syncCustomerToChatwoot(customer);
+
+    const trackingNumbers = extractOrderTrackingNumbers(order);
+    if (trackingNumbers.length > 0) {
+      registerTrackings(trackingNumbers.map((n) => ({ number: n }))).catch((err) =>
+        logger.warn('Failed to register tracking numbers with 17track', {
+          orderId: order.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+
     res.status(200).send('OK');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -70,5 +82,20 @@ router.post('/orders', async (req: Request, res: Response) => {
     res.status(500).send('Error');
   }
 });
+
+function extractOrderTrackingNumbers(order: ShopifyOrder): string[] {
+  const numbers: string[] = [];
+  for (const f of order.fulfillments ?? []) {
+    if (f.tracking_number && !numbers.includes(f.tracking_number)) {
+      numbers.push(f.tracking_number);
+    }
+    for (const tn of f.tracking_numbers ?? []) {
+      if (tn && !numbers.includes(tn)) {
+        numbers.push(tn);
+      }
+    }
+  }
+  return numbers;
+}
 
 export default router;

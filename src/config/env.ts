@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const required = [
   'SHOPIFY_STORE_DOMAIN',
@@ -7,11 +9,23 @@ const required = [
   'CHATWOOT_BASE_URL',
   'CHATWOOT_API_TOKEN',
   'CHATWOOT_ACCOUNT_ID',
+  'ANTHROPIC_API_KEY',
+  'SEVENTEENTRACK_API_KEY',
 ] as const;
 
 for (const key of required) {
   if (!process.env[key]) {
     throw new Error(`Missing required environment variable: ${key}`);
+  }
+}
+
+function loadSystemPrompt(): string {
+  try {
+    // Works from both src/ (dev with tsx) and dist/ (production build)
+    const promptPath = resolve(__dirname, '..', '..', 'src', 'config', 'systemPrompt.txt');
+    return readFileSync(promptPath, 'utf-8').trim();
+  } catch {
+    return '';
   }
 }
 
@@ -26,4 +40,9 @@ export const env = {
   syncApiKey: process.env.SYNC_API_KEY || '',
   syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS) || 0,
   port: Number(process.env.PORT) || 8080,
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+  claudeSystemPrompt: process.env.CLAUDE_SYSTEM_PROMPT || loadSystemPrompt(),
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
+  seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
+  chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
 };

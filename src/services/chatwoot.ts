@@ -205,6 +205,8 @@ export async function upsertContact(
   }
 }
 
+export { chatwootClient };
+
 export function contactHasShopifyData(contact: ChatwootContact): boolean {
   const attrs = contact.custom_attributes;
   if (!attrs) return false;
