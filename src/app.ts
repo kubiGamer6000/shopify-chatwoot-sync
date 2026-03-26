@@ -11,6 +11,9 @@ const app = express();
 // Raw body parsing for webhook routes (required for HMAC verification)
 app.use('/webhooks', express.raw({ type: 'application/json' }));
 
+// Larger JSON limit for Chatwoot webhooks (payloads include full conversation history)
+app.use('/chatwoot', express.json({ limit: '5mb' }));
+
 // JSON parsing for all other routes
 app.use(express.json());
 
