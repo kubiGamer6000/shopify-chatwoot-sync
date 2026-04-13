@@ -2,89 +2,81 @@
 
 ## Overview
 
-The server is an Express application (TypeScript, Node 22) that acts as a middleware between three external systems:
+The server is an Express application (TypeScript, Node 22) that acts as middleware between four external systems:
 
 - **Shopify** (source of truth for customers, orders, fulfillments)
 - **Chatwoot** (customer support platform where agents work)
-- **Claude AI** (generates draft replies for agents)
+- **Claude AI** (classifies intent and generates draft replies via structured output)
 - **17track** (package tracking aggregation)
 
-## Data Flow
+## Data Flows
 
-### Flow 1: Shopify → Chatwoot (Real-time)
+### Flow 1: Shopify → Chatwoot Sync (Real-time + Periodic)
 
-```
-Shopify webhook (customer/order event)
-  → HMAC verification (middleware)
-  → Parse customer from payload
-  → Fetch all customer orders from Shopify API
-  → Build custom attributes (order summary, tracking, spend, etc.)
-  → Upsert contact in Chatwoot (identifier → email → create)
-  → If order webhook: register tracking numbers with 17track
-```
+Shopify webhooks fire on customer/order events. The server fetches all orders, builds custom attributes, and upserts the Chatwoot contact. A periodic background sync fills gaps. See [Shopify Sync](shopify-sync.md) for details.
 
-### Flow 2: Shopify → Chatwoot (Periodic Sync)
+### Flow 2: AI Support Pipeline (Two-Call Architecture)
+
+When a customer sends a message in Chatwoot:
 
 ```
-Timer fires (every SYNC_INTERVAL_HOURS)
-  → Paginate through ALL Shopify customers (250/page)
-  → For each customer:
-      → Check if Chatwoot contact exists AND has Shopify data
-      → If yes: skip (no API calls)
-      → If no: fetch orders, build attributes, upsert contact
-  → 500ms delay between customers, 1s between pages
+Message arrives
+  → Hard rules check (14+ day unfulfilled → immediate human handoff)
+  → Fetch context (Chatwoot + Shopify + 17track, parallel)
+  → Call 1: Classifier (Sonnet 4.6, structured output)
+      → Returns: intent, sentiment, confidence, customer_wants_human, involves_refund
+  → Route based on classification:
+      AI-solvable (order_status, subscription_cancel, subscription_change)
+        → Call 2: Responder (Sonnet 4.6, structured output)
+        → Returns: customer_reply + private_note + resolved + discount_applied
+      Handoff-only (all others, low confidence, hostile, wants human)
+        → Template message + status → open
+  → Execute actions (send reply, post note, apply labels, change status)
 ```
 
-### Flow 3: Chatwoot Message → AI Draft
+See [AI Pipeline](ai-pipeline.md) for the full specification.
 
-```
-Customer sends message in Chatwoot
-  → Chatwoot webhook fires to POST /chatwoot
-  → Server responds 200 immediately
-  → Async processing begins:
-      1. Fetch conversation messages, details, contact history (parallel)
-      2. Look up Shopify customer (by ID from custom attributes, or by email)
-      3. Fetch order history from Shopify
-      4. Fetch tracking status from 17track (last 2 fulfilled orders)
-      5. Build structured prompt with all context
-      6. Send to Claude (system prompt + user prompt)
-      7. Post Claude's response as a private note in the conversation
-```
+### Flow 3: Tracking Registration
+
+When Shopify order webhooks arrive with fulfillment data, tracking numbers are registered with 17track. The AI pipeline queries 17track later when building context for order status inquiries.
+
+## Operating Modes
+
+Controlled by the `AI_MODE` environment variable:
+
+| Mode | Behavior |
+|------|----------|
+| `shadow` (default) | Full pipeline runs, all output posted as private notes only. No customer replies, no status changes, no labels. |
+| `live` | Full Agent Bot mode with customer-facing replies, status management, and labels. |
+| `off` | Pipeline disabled entirely. |
 
 ## Authentication
 
 ### Shopify API
 
-OAuth2 **client_credentials** grant. The server requests a token from Shopify's `/admin/oauth/access_token` endpoint using the app's client ID and secret. Tokens are cached in memory and refreshed 1 hour before their ~24h expiry. An Axios request interceptor injects the token into every outgoing Shopify API call.
+OAuth2 **client_credentials** grant. Tokens cached in memory, refreshed 1 hour before ~24h expiry. Axios interceptor injects the token into every request.
 
 ### Shopify Webhooks
 
-Incoming webhooks are verified using HMAC-SHA256. The `X-Shopify-Hmac-Sha256` header is compared (timing-safe) against a hash computed from the raw request body using the client secret as the key.
+HMAC-SHA256 verification using the client secret. Timing-safe comparison.
 
 ### Chatwoot API
 
-A static `api_access_token` is sent in every request header. The Axios client includes a response interceptor that retries on 429 with exponential backoff (2s base, up to 4 retries).
+Static `api_access_token` header. Response interceptor retries on 429 with exponential backoff (2s base, up to 4 retries).
 
 ### Chatwoot Webhook
 
-Optional query-string secret: `POST /chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`. If `CHATWOOT_WEBHOOK_SECRET` is set, requests without the matching `?secret=` param are rejected.
+Optional query-string secret: `POST /chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`.
 
-### Sync Endpoint
+### Claude API
 
-Bearer token auth via `Authorization: Bearer <SYNC_API_KEY>`. If `SYNC_API_KEY` is not set, the endpoint is unprotected (a warning is logged).
+API key via Anthropic SDK. Auto-retries on 429/5xx (3 attempts).
 
 ## Rate Limiting
 
 | Service | Strategy |
 |---------|----------|
 | Shopify API | Retries on 429 using `Retry-After` header, up to 3 attempts |
-| Chatwoot API | Axios interceptor with exponential backoff (2s → 4s → 8s → 16s), up to 4 retries |
-| Sync throttling | 500ms delay between customers, 1s delay between pages |
-
-## Key Design Decisions
-
-- **Filter, not search** — Chatwoot contact lookups use `/contacts/filter` (exact match) instead of `/contacts/search` (fuzzy). This prevents false matches.
-- **Immediate 200 on Chatwoot webhook** — The AI draft flow is async. The webhook returns 200 before any processing to avoid Chatwoot timeouts.
-- **Private notes, not replies** — Claude drafts are posted as private notes so agents can review and edit before sending.
-- **Tracking on webhook, not on prompt** — Tracking numbers are registered with 17track when order webhooks arrive, so data is available by the time a customer asks about it.
-- **Skip-if-populated sync** — The periodic sync only processes customers that are missing Shopify data in Chatwoot, keeping subsequent runs fast.
+| Chatwoot API | Exponential backoff (2s → 4s → 8s → 16s), up to 4 retries |
+| Claude API | SDK auto-retry, 3 attempts |
+| Sync throttling | 500ms between customers, 1s between pages |

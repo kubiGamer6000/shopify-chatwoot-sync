@@ -1,9 +1,10 @@
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { ChatwootMessage, ChatwootConversation } from '../types/chatwoot.js';
 import type { TrackingSummary } from '../types/tracking.js';
+import type { Classification } from '../types/ai.js';
 import { formatAddress, countSubscriptionOrders } from './formatters.js';
 
-export interface PromptContext {
+export interface PipelineContext {
   customerName?: string;
   customerEmail?: string;
   shopifyCustomer?: ShopifyCustomer | null;
@@ -13,12 +14,32 @@ export interface PromptContext {
   previousConversations: ChatwootConversation[];
   conversationId: number;
   isNewConversation: boolean;
+  aiTurnCount: number;
 }
 
-export function buildPrompt(ctx: PromptContext): string {
+export function buildClassifierContext(ctx: PipelineContext): string {
   const sections: string[] = [];
 
   sections.push(`Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`);
+  sections.push(buildCustomerSection(ctx));
+  sections.push(buildOrderSection(ctx.orders));
+  sections.push(buildCurrentConversationSection(ctx.currentMessages));
+
+  return sections.filter(Boolean).join('\n\n');
+}
+
+export function buildResponderContext(
+  ctx: PipelineContext,
+  classification: Classification,
+): string {
+  const sections: string[] = [];
+
+  sections.push(`Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`);
+
+  sections.push(`--- CLASSIFICATION ---
+Intent: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})
+Sentiment: ${classification.sentiment}
+AI turn: ${ctx.aiTurnCount} of 3`);
 
   sections.push(buildCustomerSection(ctx));
   sections.push(buildOrderSection(ctx.orders));
@@ -29,7 +50,7 @@ export function buildPrompt(ctx: PromptContext): string {
   return sections.filter(Boolean).join('\n\n');
 }
 
-function buildCustomerSection(ctx: PromptContext): string {
+function buildCustomerSection(ctx: PipelineContext): string {
   const name = ctx.customerName || 'Unknown';
   const email = ctx.customerEmail || 'Unknown';
   const conversationType = ctx.isNewConversation ? 'a new conversation' : 'an ongoing conversation';
@@ -46,15 +67,18 @@ function buildCustomerSection(ctx: PromptContext): string {
     ? formatAddress(ctx.shopifyCustomer.default_address)
     : 'Not available';
 
+  const hasShopifyData = ctx.shopifyCustomer != null;
+
   const lines = [
     `Customer: ${name} (${email})`,
+    `Shopify data: ${hasShopifyData ? 'Found' : 'NOT FOUND — customer email could not be matched to Shopify'}`,
     `Conversation: This is ${conversationType} (conversation #${ctx.conversationId}).`,
     `Total orders: ${totalOrders}, of which ${subscriptionOrders} are subscription orders.`,
     `Lifetime value: ${totalSpent} ${currency}`,
     `Shipping address: ${address}`,
   ];
 
-  return lines.join('\n');
+  return `--- CUSTOMER ---\n${lines.join('\n')}`;
 }
 
 function buildOrderSection(orders: ShopifyOrder[]): string {
@@ -68,13 +92,16 @@ function buildOrderSection(orders: ShopifyOrder[]): string {
     const date = order.created_at?.split('T')[0] ?? 'N/A';
     const financial = order.financial_status ?? 'unknown';
     const fulfillment = order.fulfillment_status ?? 'unfulfilled';
+    const daysSinceOrder = Math.floor(
+      (Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60 * 24),
+    );
     const items = order.line_items
       ?.map((li) => `${li.title} x${li.quantity} (${li.price} ${order.currency})`)
       .join(', ') ?? 'No items';
     const cancelled = order.cancelled_at ? ` [CANCELLED: ${order.cancel_reason ?? 'N/A'}]` : '';
 
     return [
-      `Order ${order.name} | ${date} | ${order.total_price} ${order.currency} | ${financial} / ${fulfillment}${cancelled}`,
+      `Order ${order.name} | ${date} (${daysSinceOrder}d ago) | ${order.total_price} ${order.currency} | ${financial} / ${fulfillment}${cancelled}`,
       `  Items: ${items}`,
     ].join('\n');
   });

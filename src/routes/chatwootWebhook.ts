@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
-import { handleIncomingMessage } from '../services/aiDraft.js';
+import { handleIncomingMessage } from '../services/pipeline.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const router = Router();
@@ -16,24 +16,30 @@ router.post('/', (req: Request, res: Response) => {
     return;
   }
 
+  if (env.aiMode === 'off') return;
+
   const payload = req.body as ChatwootWebhookPayload;
 
-  if (payload.event !== 'message_created') return;
-  if (payload.message_type !== 'incoming') return;
-  if (payload.private === true) return;
+  // Handle both regular webhooks (message_created) and Agent Bot events
+  const event = payload.event;
+  if (event !== 'message_created' && event !== 'conversation_created') return;
 
-  // To restrict AI drafts to specific inboxes, uncomment and set AI_INBOX_IDS env var:
-  // const allowedInboxes = process.env.AI_INBOX_IDS;
-  // if (allowedInboxes && !allowedInboxes.split(',').includes(String(payload.inbox?.id))) return;
+  // For message_created: only process incoming, non-private messages
+  if (event === 'message_created') {
+    if (payload.message_type !== 'incoming') return;
+    if (payload.private === true) return;
+  }
 
   logger.info('Chatwoot webhook: incoming message', {
+    event,
     conversationId: payload.conversation.id,
     senderId: payload.sender.id,
     senderEmail: payload.sender.email,
+    mode: env.aiMode,
   });
 
   handleIncomingMessage(payload).catch((err) => {
-    logger.error('AI draft processing failed', {
+    logger.error('Pipeline processing failed', {
       conversationId: payload.conversation.id,
       error: err instanceof Error ? err.message : String(err),
     });

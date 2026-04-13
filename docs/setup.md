@@ -33,14 +33,17 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `AI_MODE` | `shadow` | AI pipeline mode: `shadow` (private notes only), `live` (full Agent Bot), `off` (disabled) |
 | `CHATWOOT_INBOX_ID` | — | Inbox ID for new contact creation. Required to create contacts that don't exist yet in Chatwoot. Find it in Settings → Inboxes (number in the URL). |
+| `CHATWOOT_BOT_TOKEN` | — | Agent Bot access token. If set, bot messages are attributed to the bot in the Chatwoot UI. |
 | `SYNC_API_KEY` | — | Bearer token to protect `POST /sync/customers`. If unset, the endpoint is open. |
 | `SYNC_INTERVAL_HOURS` | `0` (disabled) | How often to run the periodic background sync. Set to `6` for every 6 hours. |
 | `PORT` | `8080` | Server port |
-| `CLAUDE_SYSTEM_PROMPT` | contents of `src/config/systemPrompt.txt` | Override the AI system prompt entirely via env var |
-| `CLAUDE_MODEL` | `claude-sonnet-4-20250514` | Anthropic model to use |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6-20260320` | Anthropic model to use for both classification and response |
+| `CLASSIFIER_PROMPT` | contents of `src/config/prompts/classifier.txt` | Override the classifier system prompt via env var |
+| `RESPONDER_PROMPT` | contents of `src/config/prompts/responder.txt` | Override the responder system prompt via env var |
 | `CHATWOOT_WEBHOOK_SECRET` | — | Secret for the Chatwoot webhook URL query string. If set, requests to `POST /chatwoot` must include `?secret=<value>`. |
-| `DEBUG` | — | Set to any value to enable debug logging and post full AI prompts as private notes |
+| `DEBUG` | — | Set to any value to enable debug logging |
 
 ## Local Development
 
@@ -84,10 +87,40 @@ Go to your Chatwoot profile → Access Token. Copy it to `CHATWOOT_API_TOKEN`.
 
 ### 4. Configure the Chatwoot Webhook
 
+**For shadow mode** (default, recommended first step):
+
 Go to **Settings → Integrations → Webhooks** and add:
 
 - **URL:** `https://<your-server>/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`
 - **Events:** Check `message_created`
+
+This is a regular webhook — conversations flow to agents normally, and AI results appear as private notes.
+
+### 5. Create Labels (for live mode)
+
+Go to **Settings → Labels** and create:
+
+| Label | Color suggestion |
+|-------|-----------------|
+| `order-status` | Blue |
+| `subscription` | Blue |
+| `refund` | Blue |
+| `change-address` | Blue |
+| `product-issue` | Blue |
+| `other` | Blue |
+| `ai-resolved` | Green |
+| `escalated` | Orange |
+| `urgent` | Red |
+
+### 6. Set Up Agent Bot (for live mode only)
+
+When ready to switch from shadow to live mode:
+
+1. Go to **Settings → Integrations → Agent Bots** (or create via API)
+2. Set `outgoing_url` to `https://<your-server>/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`
+3. Assign bot to your email inbox under **Settings → Inboxes → [Inbox] → Collaborators → Agent Bots**
+4. Set `AI_MODE=live` in your environment
+5. New conversations will now start as `pending` (invisible to agents until the bot hands off)
 
 ## Shopify Setup
 

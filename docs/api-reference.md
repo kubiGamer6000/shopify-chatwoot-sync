@@ -60,7 +60,7 @@ Triggers a full background sync of all Shopify customers to Chatwoot.
 
 ### `POST /chatwoot`
 
-Receives Chatwoot webhook events and generates AI draft replies.
+Receives Chatwoot webhook events (regular webhooks or Agent Bot events) and runs the AI support pipeline.
 
 **Auth:** Optional query-string secret: `POST /chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`. If the env var is set, requests without a matching secret are rejected (silently, after returning 200).
 
@@ -68,9 +68,14 @@ Receives Chatwoot webhook events and generates AI draft replies.
 
 **Behavior:**
 1. Returns `200` immediately.
-2. Ignores everything except `message_created` events with `incoming` message type that are not private.
-3. Asynchronously assembles context (Shopify orders, tracking, conversation history) and generates a Claude AI draft.
-4. Posts the draft as a private note in the conversation.
+2. If `AI_MODE=off`, stops.
+3. Filters to `message_created` (incoming, non-private) and `conversation_created` events.
+4. Runs the AI pipeline asynchronously:
+   - Checks hard rules (14+ day unfulfilled orders)
+   - Classifies intent via Claude structured output
+   - Routes to responder (AI-solvable) or template handoff
+   - In **shadow mode**: posts all results as a single private note
+   - In **live mode**: sends customer reply, posts private note, applies labels, changes status
 
 **Response:** Always `200 { "received": true }` (processing is async)
 

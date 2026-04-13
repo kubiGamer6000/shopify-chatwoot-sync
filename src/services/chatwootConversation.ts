@@ -47,9 +47,56 @@ export async function postPrivateNote(
       content_type: 'text',
     },
   );
-  logger.info('Posted AI draft as private note', {
+  logger.info('Posted private note', {
     conversationId,
     messageId: res.data.id,
   });
   return res.data;
+}
+
+export async function sendOutgoingMessage(
+  conversationId: number,
+  content: string,
+): Promise<ChatwootMessage> {
+  const res = await chatwootClient.post<ChatwootMessage>(
+    `/conversations/${conversationId}/messages`,
+    {
+      content,
+      message_type: 'outgoing',
+      private: false,
+      content_type: 'text',
+    },
+  );
+  logger.info('Sent outgoing message', {
+    conversationId,
+    messageId: res.data.id,
+  });
+  return res.data;
+}
+
+export async function toggleConversationStatus(
+  conversationId: number,
+  status: 'open' | 'resolved' | 'pending' | 'snoozed',
+): Promise<void> {
+  await chatwootClient.post(
+    `/conversations/${conversationId}/toggle_status`,
+    { status },
+  );
+  logger.info('Toggled conversation status', { conversationId, status });
+}
+
+export async function applyLabels(
+  conversationId: number,
+  labels: string[],
+): Promise<void> {
+  const current = await chatwootClient.get<{ payload: string[] }>(
+    `/conversations/${conversationId}/labels`,
+  );
+  const existing = current.data.payload ?? [];
+  const merged = [...new Set([...existing, ...labels])];
+  await chatwootClient.post(
+    `/conversations/${conversationId}/labels`,
+    { labels: merged },
+  );
+  logger.info('Applied labels', { conversationId, labels: merged });
 }

@@ -1,6 +1,6 @@
 # Scandi Chatwoot Integration
 
-A Node.js/TypeScript server that bridges Shopify, Chatwoot, and Claude AI to give support agents instant customer context and AI-drafted replies.
+A Node.js/TypeScript server that bridges Shopify, Chatwoot, and Claude AI to power automated customer support with intelligent human handoff.
 
 ```
                  ┌──────────────┐
@@ -10,20 +10,20 @@ A Node.js/TypeScript server that bridges Shopify, Chatwoot, and Claude AI to giv
                         ▼               │
 ┌────────────┐   ┌─────────────┐        │    ┌──────────┐
 │  Chatwoot   │──▶│   Express   │◀───────┘    │  Claude  │
-│  (webhook)  │   │   Server    │────────────▶│   AI     │
-└────────────┘   └──────┬──────┘              └──────────┘
-                        │
+│  (webhook)  │   │   Server    │────────────▶│ Sonnet   │
+└────────────┘   └──────┬──────┘  classify +  │  4.6     │
+                        │         respond     └──────────┘
               ┌─────────┼─────────┐
               ▼         ▼         ▼
          Chatwoot    17track   Chatwoot
-         (contacts)  (tracking) (notes)
+         (contacts)  (tracking) (replies + notes)
 ```
 
-**Three things happen:**
+**What it does:**
 
-1. **Shopify → Chatwoot sync** — Customer and order data flows into Chatwoot contacts via real-time webhooks and a periodic background sync.
-2. **Tracking registration** — When orders are fulfilled, tracking numbers are registered with 17track for status lookups.
-3. **AI draft replies** — When a customer sends a message in Chatwoot, the server gathers their full context (orders, tracking, conversation history) and asks Claude to draft a reply, posted as a private note for agents to review.
+1. **Shopify → Chatwoot sync** — Customer and order data flows into Chatwoot contacts via webhooks and periodic sync.
+2. **AI support pipeline** — Two-call Claude architecture: classifies intent, then auto-responds to easy queries (order status, subscriptions) or performs warm human handoff with full context for everything else.
+3. **Shadow mode** — Run the full AI pipeline as private notes only, so agents can validate before going live.
 
 ## Quick Start
 
@@ -33,13 +33,15 @@ npm install
 npm run dev              # starts with hot-reload via tsx
 ```
 
+Set `AI_MODE=shadow` (default) to test the AI pipeline without customer impact.
+
 ## Documentation
 
 | Document | What it covers |
 |----------|---------------|
-| [Architecture](docs/architecture.md) | System design, data flow diagrams, how services connect |
-| [AI Draft System](docs/ai-draft.md) | Claude integration, prompt building, context assembly |
+| [Architecture](docs/architecture.md) | System design, two-call pipeline, data flows, authentication |
+| [AI Pipeline](docs/ai-pipeline.md) | Classification, response generation, routing, playbooks, shadow mode |
 | [Shopify Sync](docs/shopify-sync.md) | Webhook handling, periodic sync, contact matching logic |
 | [API Reference](docs/api-reference.md) | All endpoints, authentication, webhook payloads |
-| [Setup & Deployment](docs/setup.md) | Environment variables, Chatwoot config, Shopify webhooks, DigitalOcean |
+| [Setup & Deployment](docs/setup.md) | Environment variables, Chatwoot/Shopify config, deployment |
 | [Project Structure](docs/project-structure.md) | File-by-file guide to the codebase |

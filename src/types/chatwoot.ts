@@ -28,17 +28,17 @@ export interface ChatwootWebhookInbox {
 
 export interface ChatwootWebhookPayload {
   event: string;
-  id: number;
-  content: string;
-  content_type: string;
-  message_type: 'incoming' | 'outgoing' | 'template';
-  created_at: string;
-  private: boolean;
+  id?: number;
+  content?: string;
+  content_type?: string;
+  message_type?: 'incoming' | 'outgoing' | 'template';
+  created_at?: string;
+  private?: boolean;
   sender: ChatwootWebhookSender;
   conversation: ChatwootWebhookConversation;
   account: ChatwootWebhookAccount;
-  inbox: ChatwootWebhookInbox;
-  attachments: unknown[];
+  inbox?: ChatwootWebhookInbox;
+  attachments?: unknown[];
 }
 
 // --- Chatwoot REST API Types ---

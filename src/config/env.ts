@@ -19,10 +19,16 @@ for (const key of required) {
   }
 }
 
-function loadSystemPrompt(): string {
+export type AiMode = 'shadow' | 'live' | 'off';
+
+function parseAiMode(value: string | undefined): AiMode {
+  if (value === 'live' || value === 'off') return value;
+  return 'shadow';
+}
+
+function loadPromptFile(filename: string): string {
   try {
-    // Works from both src/ (dev with tsx) and dist/ (production build)
-    const promptPath = resolve(__dirname, '..', '..', 'src', 'config', 'systemPrompt.txt');
+    const promptPath = resolve(__dirname, '..', '..', 'src', 'config', 'prompts', filename);
     return readFileSync(promptPath, 'utf-8').trim();
   } catch {
     return '';
@@ -37,12 +43,15 @@ export const env = {
   chatwootApiToken: process.env.CHATWOOT_API_TOKEN!,
   chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID!,
   chatwootInboxId: process.env.CHATWOOT_INBOX_ID || '',
+  chatwootBotToken: process.env.CHATWOOT_BOT_TOKEN || '',
   syncApiKey: process.env.SYNC_API_KEY || '',
   syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS) || 0,
   port: Number(process.env.PORT) || 8080,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
-  claudeSystemPrompt: process.env.CLAUDE_SYSTEM_PROMPT || loadSystemPrompt(),
-  claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6-20260320',
+  classifierPrompt: process.env.CLASSIFIER_PROMPT || loadPromptFile('classifier.txt'),
+  responderPrompt: process.env.RESPONDER_PROMPT || loadPromptFile('responder.txt'),
   seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
+  aiMode: parseAiMode(process.env.AI_MODE),
 };

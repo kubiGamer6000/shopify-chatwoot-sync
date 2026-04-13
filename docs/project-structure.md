@@ -3,8 +3,11 @@
 ```
 src/
 ├── config/
-│   ├── env.ts                    # Environment config
-│   └── systemPrompt.txt          # Default Claude system prompt
+│   ├── env.ts                    # Environment config and validation
+│   ├── templates.ts              # Handoff template messages per intent
+│   └── prompts/
+│       ├── classifier.txt        # Classifier system prompt (intent definitions)
+│       └── responder.txt         # Responder system prompt (playbooks)
 ├── middleware/
 │   ├── verifyShopifyWebhook.ts   # HMAC verification
 │   ├── syncAuth.ts               # Bearer token auth
@@ -12,23 +15,27 @@ src/
 ├── routes/
 │   ├── webhooks.ts               # Shopify webhook handlers
 │   ├── sync.ts                   # Manual sync trigger
-│   └── chatwootWebhook.ts        # Chatwoot webhook → AI draft
+│   └── chatwootWebhook.ts        # Chatwoot webhook → AI pipeline
 ├── services/
 │   ├── shopifyAuth.ts            # OAuth token management
 │   ├── shopify.ts                # Shopify REST API client
 │   ├── chatwoot.ts               # Chatwoot API client (contacts)
-│   ├── chatwootConversation.ts   # Chatwoot API client (conversations)
+│   ├── chatwootConversation.ts   # Chatwoot API client (conversations, messages, labels, status)
 │   ├── sync.ts                   # Full sync logic and scheduler
 │   ├── tracking.ts               # 17track API client
-│   ├── claude.ts                 # Anthropic SDK wrapper
-│   └── aiDraft.ts                # AI draft orchestrator
+│   ├── claude.ts                 # Claude structured output call
+│   ├── classifier.ts             # Call 1: intent classification
+│   ├── responder.ts              # Call 2: response generation
+│   ├── pipeline.ts               # Main AI orchestrator
+│   └── hardRules.ts              # Pre-AI rule checks
 ├── types/
 │   ├── index.ts                  # Shopify + Chatwoot contact types
 │   ├── chatwoot.ts               # Chatwoot webhook + REST API types
-│   └── tracking.ts               # 17track API types
+│   ├── tracking.ts               # 17track API types
+│   └── ai.ts                     # Classification + Response Zod schemas
 ├── utils/
 │   ├── formatters.ts             # Data formatting utilities
-│   ├── promptBuilder.ts          # Claude prompt assembly
+│   ├── promptBuilder.ts          # Context assembly for classifier and responder
 │   └── logger.ts                 # Structured console logger
 ├── app.ts                        # Express app setup and routing
 └── server.ts                     # Entry point
@@ -40,60 +47,66 @@ src/
 
 **`src/server.ts`** — Starts the Express server, kicks off the periodic sync scheduler, handles graceful shutdown on SIGTERM/SIGINT.
 
-**`src/app.ts`** — Configures Express middleware and mounts route groups. Key detail: `/webhooks` uses `express.raw()` for HMAC verification, `/chatwoot` uses `express.json({ limit: '5mb' })` for large webhook payloads, and everything else uses standard `express.json()`.
+**`src/app.ts`** — Configures Express middleware and mounts route groups. `/webhooks` uses `express.raw()` for HMAC verification, `/chatwoot` uses `express.json({ limit: '5mb' })` for large webhook payloads.
 
 ### Config
 
-**`src/config/env.ts`** — Validates required environment variables at startup (throws if missing), exports a typed `env` object. Loads the system prompt from file or env var.
+**`src/config/env.ts`** — Validates required environment variables at startup, exports a typed `env` object. Key additions: `AI_MODE` (shadow/live/off), `chatwootBotToken`, `classifierPrompt`, `responderPrompt`.
 
-**`src/config/systemPrompt.txt`** — Default Claude system prompt defining the "Andrew" persona, brand context, and behavioral rules. Loaded at startup by `env.ts`. Can be overridden entirely via `CLAUDE_SYSTEM_PROMPT` env var.
+**`src/config/templates.ts`** — Handoff template messages keyed by intent. Also maps intents to Chatwoot topic labels. No AI generation needed for these — they're static templates.
 
-### Middleware
+**`src/config/prompts/classifier.txt`** — System prompt for the classification call. Defines all 9 intents with descriptions and examples, confidence scoring rules, and the `other` label hard rule.
 
-**`src/middleware/verifyShopifyWebhook.ts`** — Computes HMAC-SHA256 of the raw request body using the Shopify client secret and compares it (timing-safe) against the `X-Shopify-Hmac-Sha256` header. Rejects requests that don't match.
+**`src/config/prompts/responder.txt`** — System prompt for the response generation call. Contains the "Andrew" persona, brand voice rules, and playbooks for order_status, subscription_cancel, and subscription_change.
 
-**`src/middleware/syncAuth.ts`** — Checks `Authorization: Bearer <token>` against `SYNC_API_KEY`. Passes through with a warning if the key isn't configured.
+### Services (AI Pipeline)
 
-**`src/middleware/errorHandler.ts`** — Catches unhandled errors, logs them, returns 500 JSON.
+**`src/services/pipeline.ts`** — The main orchestrator. Handles the full lifecycle: hard rules check → context fetch → classify → route → respond/handoff → post results. Branches on `AI_MODE` at the action stage — shadow mode posts a combined private note, live mode sends real replies. Includes the in-memory turn counter.
 
-### Routes
+**`src/services/classifier.ts`** — Assembles the classifier prompt with conversation context and calls Claude via structured output. Returns a typed `Classification` object.
 
-**`src/routes/webhooks.ts`** — Handles Shopify customer and order webhooks. Parses the raw Buffer body, syncs the customer to Chatwoot, and registers tracking numbers with 17track on order events.
+**`src/services/responder.ts`** — Assembles the responder prompt with full context (including classifier output) and calls Claude via structured output. Returns a typed `AiResponse` object with both customer reply and private note.
 
-**`src/routes/sync.ts`** — Single endpoint `POST /customers` that triggers a full background sync. Returns 409 if already running, 202 otherwise.
+**`src/services/claude.ts`** — Generic `structuredCall<T>()` function. Takes a system prompt, user prompt, and Zod schema, calls Claude with `output_config.format` using the SDK's `zodOutputFormat` helper. Validates the response against the schema before returning.
 
-**`src/routes/chatwootWebhook.ts`** — Receives Chatwoot `message_created` webhooks. Responds 200 immediately, then filters for incoming customer messages and delegates to the AI draft pipeline.
+**`src/services/hardRules.ts`** — Pre-AI code checks. Currently checks for unfulfilled orders older than 14 days, which trigger immediate human handoff without any AI call.
 
-### Services
+### Services (Shopify + Chatwoot)
 
-**`src/services/shopifyAuth.ts`** — Manages OAuth2 client_credentials tokens for the Shopify Admin API. Caches the token in memory and refreshes it 1 hour before expiry.
+**`src/services/shopifyAuth.ts`** — OAuth2 client_credentials token management. Cached in memory, refreshed 1 hour before expiry.
 
-**`src/services/shopify.ts`** — Shopify REST API client built on Axios. Handles cursor-based pagination (Link header parsing), 429 retries, and provides functions to fetch orders, customers, and search by email. Uses API version `2026-01`.
+**`src/services/shopify.ts`** — Shopify REST API client. Handles cursor-based pagination, 429 retries. API version `2026-01`.
 
-**`src/services/chatwoot.ts`** — Chatwoot REST API client for contact operations. Includes a 429 retry interceptor with exponential backoff. Exports the core `upsertContact` function with the multi-step matching logic (identifier → email → create → 422 retry). Also exports `chatwootClient` for use by `chatwootConversation.ts`.
+**`src/services/chatwoot.ts`** — Chatwoot REST API client for contact operations (filter, create, update, upsert). Includes 429 retry interceptor.
 
-**`src/services/chatwootConversation.ts`** — Chatwoot REST API functions for conversation data: fetching messages, conversation details, contact conversations, and posting private notes. Uses the shared `chatwootClient` from `chatwoot.ts`.
+**`src/services/chatwootConversation.ts`** — Chatwoot conversation operations: fetch messages, conversation details, contact conversations, post private notes, send outgoing messages, toggle status, and apply labels.
 
-**`src/services/sync.ts`** — Full sync logic: paginates all Shopify customers, skips those already populated in Chatwoot, upserts the rest. Includes the periodic scheduler (`setInterval` + initial `setTimeout`).
+**`src/services/sync.ts`** — Full customer sync: paginates all Shopify customers, skips those already populated, upserts the rest. Periodic scheduler.
 
-**`src/services/tracking.ts`** — 17track API client. Registers tracking numbers and fetches their status. If a number isn't registered yet, it auto-registers, waits 3 seconds, and retries the status fetch.
-
-**`src/services/claude.ts`** — Thin wrapper around the Anthropic SDK. Takes a system prompt and user prompt, calls `messages.create`, returns the first text block content or null. Logs token usage.
-
-**`src/services/aiDraft.ts`** — The AI draft orchestrator. Coordinates all 5 phases: fetch Chatwoot context, look up Shopify customer, get tracking status, build the prompt, call Claude, and post the result as a private note.
+**`src/services/tracking.ts`** — 17track API client. Register and fetch tracking status, with auto-register-and-retry for unregistered numbers.
 
 ### Types
 
-**`src/types/index.ts`** — TypeScript interfaces for Shopify entities (Customer, Order, Address, Fulfillment, LineItem) and Chatwoot contact types (Contact, ContactPayload, CustomAttributes, SearchResponse).
+**`src/types/ai.ts`** — Zod schemas for `ClassificationSchema` and `ResponseSchema`, plus derived TypeScript types. Also defines intent constants, AI-solvable vs. handoff intent sets, and pipeline thresholds.
 
-**`src/types/chatwoot.ts`** — Two sets of types: webhook payload types (string message_type, ISO dates) and REST API types (integer message_type, Unix timestamps). Also includes conversation, message, and contact meta types.
+**`src/types/index.ts`** — Shopify entities and Chatwoot contact types.
 
-**`src/types/tracking.ts`** — 17track API response shapes: TrackInfo, TrackEvent, TrackProvider, accepted/rejected items, and the simplified TrackingSummary used internally.
+**`src/types/chatwoot.ts`** — Chatwoot webhook payload types (handles both regular webhooks and Agent Bot events) and REST API types.
+
+**`src/types/tracking.ts`** — 17track API response shapes.
 
 ### Utils
 
-**`src/utils/formatters.ts`** — Data formatting: E.164 phone normalization, subscription order counting (by tag), address formatting, order line summaries, and `buildCustomAttributes` which assembles the full set of Chatwoot custom attributes from a customer and their orders.
+**`src/utils/promptBuilder.ts`** — Builds context strings for the classifier and responder. `buildClassifierContext()` provides a lighter context (customer info, orders, current conversation). `buildResponderContext()` adds classification result, tracking data, and previous conversations.
 
-**`src/utils/promptBuilder.ts`** — Assembles the Claude user prompt from all available context. Builds sections for: current date, customer info, order history with line items, tracking status with event timelines, current conversation thread, and up to 5 previous conversations.
+**`src/utils/formatters.ts`** — Data formatting: E.164 phone normalization, subscription counting, address formatting, order summaries, `buildCustomAttributes` for Chatwoot sync.
 
-**`src/utils/logger.ts`** — Structured console logger with ISO timestamps. Supports `info`, `warn`, `error`, and `debug` (debug only logs when `DEBUG` env var is set).
+**`src/utils/logger.ts`** — Structured console logger with ISO timestamps. Debug level gated by `DEBUG` env var.
+
+### Routes
+
+**`src/routes/chatwootWebhook.ts`** — Receives Chatwoot webhooks (both regular and Agent Bot). Filters to incoming customer messages, delegates to `pipeline.ts`. Responds 200 immediately, processing is async.
+
+**`src/routes/webhooks.ts`** — Shopify customer and order webhooks. Syncs customer to Chatwoot, registers tracking numbers with 17track.
+
+**`src/routes/sync.ts`** — Manual full sync trigger. Returns 409 if already running.
