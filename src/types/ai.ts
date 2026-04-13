@@ -9,6 +9,7 @@ export const INTENTS = [
   'change_address',
   'product_not_received',
   'product_defect',
+  'business',
   'other',
 ] as const;
 
@@ -26,6 +27,7 @@ export const HANDOFF_INTENTS: ReadonlySet<Intent> = new Set([
   'change_address',
   'product_not_received',
   'product_defect',
+  'business',
   'other',
 ]);
 
@@ -33,7 +35,8 @@ export const SENTIMENTS = ['positive', 'neutral', 'negative', 'hostile'] as cons
 export type Sentiment = (typeof SENTIMENTS)[number];
 
 export const ClassificationSchema = z.object({
-  intent: z.enum(INTENTS),
+  intents: z.array(z.enum(INTENTS)).min(1),
+  primary_intent: z.enum(INTENTS),
   sentiment: z.enum(SENTIMENTS),
   confidence: z.number(),
   customer_wants_human: z.boolean(),

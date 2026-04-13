@@ -21,17 +21,23 @@ export function getHandoffTemplate(intent: Intent, reason?: 'customer_wants_huma
   return HANDOFF_TEMPLATES[intent] ?? null;
 }
 
-export function getIntentTopicLabel(intent: Intent): string {
-  const INTENT_TO_LABEL: Record<Intent, string> = {
-    order_status: 'order-status',
-    subscription_cancel: 'subscription',
-    subscription_cancel_and_refund: 'subscription',
-    subscription_change: 'subscription',
-    refund_request: 'refund',
-    change_address: 'change-address',
-    product_not_received: 'product-not-received',
+const INTENT_TO_LABEL: Record<Intent, string> = {
+  order_status: 'order-status',
+  subscription_cancel: 'subscription',
+  subscription_cancel_and_refund: 'subscription',
+  subscription_change: 'subscription',
+  refund_request: 'refund',
+  change_address: 'change-address',
+  product_not_received: 'product-not-received',
     product_defect: 'product-defect',
+    business: 'business',
     other: 'other',
-  };
+};
+
+export function getIntentTopicLabel(intent: Intent): string {
   return INTENT_TO_LABEL[intent];
+}
+
+export function getIntentTopicLabels(intents: Intent[]): string[] {
+  return [...new Set(intents.map((i) => INTENT_TO_LABEL[i]))];
 }

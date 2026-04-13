@@ -37,7 +37,8 @@ export function buildResponderContext(
   sections.push(`Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`);
 
   sections.push(`--- CLASSIFICATION ---
-Intent: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})
+Intents: ${classification.intents.join(', ')} (primary: ${classification.primary_intent})
+Confidence: ${classification.confidence.toFixed(2)}
 Sentiment: ${classification.sentiment}
 AI turn: ${ctx.aiTurnCount} of 3`);
 

@@ -15,12 +15,12 @@ import { getTrackingStatus } from './tracking.js';
 import { checkHardRules } from './hardRules.js';
 import { classify } from './classifier.js';
 import { generateResponse } from './responder.js';
-import { getHandoffTemplate, getIntentTopicLabel } from '../config/templates.js';
+import { getHandoffTemplate, getIntentTopicLabels } from '../config/templates.js';
 import type { PipelineContext } from '../utils/promptBuilder.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { TrackingSummary } from '../types/tracking.js';
-import type { Classification, AiResponse } from '../types/ai.js';
+import type { Classification, AiResponse, Intent } from '../types/ai.js';
 import { AI_SOLVABLE_INTENTS, CONFIDENCE_THRESHOLD, MAX_AI_TURNS } from '../types/ai.js';
 
 // In-memory turn counter: conversationId → number of bot replies sent
@@ -141,15 +141,14 @@ export async function handleIncomingMessage(
   const classification = await classify(ctx);
   if (!classification) {
     logger.error('Classification failed, falling back to handoff', { conversationId });
-    await executeHandoff(conversationId, 'other', null, 'Classification failed — AI could not process this message.', mode);
+    await executeHandoff(conversationId, null, 'Classification failed — AI could not process this message.', mode);
     return;
   }
 
-  // --- Phase 5: Route ---
+  // --- Phase 5: Route (based on primary_intent, labels from all intents) ---
   if (classification.customer_wants_human) {
     await executeHandoff(
       conversationId,
-      classification.intent,
       classification,
       'customer_wants_human',
       mode,
@@ -158,23 +157,23 @@ export async function handleIncomingMessage(
   }
 
   if (classification.sentiment === 'hostile') {
-    await executeHandoff(conversationId, classification.intent, classification, 'hostile_sentiment', mode);
+    await executeHandoff(conversationId, classification, 'hostile_sentiment', mode);
     return;
   }
 
   if (classification.confidence < CONFIDENCE_THRESHOLD) {
-    await executeHandoff(conversationId, 'other', classification, 'low_confidence', mode);
+    await executeHandoff(conversationId, classification, 'low_confidence', mode);
     return;
   }
 
   const currentTurn = getTurnCount(conversationId);
   if (currentTurn >= MAX_AI_TURNS) {
-    await executeHandoff(conversationId, classification.intent, classification, 'max_turns_reached', mode);
+    await executeHandoff(conversationId, classification, 'max_turns_reached', mode);
     return;
   }
 
-  if (!AI_SOLVABLE_INTENTS.has(classification.intent)) {
-    await executeHandoff(conversationId, classification.intent, classification, 'handoff_intent', mode);
+  if (!AI_SOLVABLE_INTENTS.has(classification.primary_intent)) {
+    await executeHandoff(conversationId, classification, 'handoff_intent', mode);
     return;
   }
 
@@ -182,7 +181,7 @@ export async function handleIncomingMessage(
   const response = await generateResponse(ctx, classification);
   if (!response) {
     logger.error('Responder failed, falling back to handoff', { conversationId });
-    await executeHandoff(conversationId, classification.intent, classification, 'responder_failed', mode);
+    await executeHandoff(conversationId, classification, 'responder_failed', mode);
     return;
   }
 
@@ -219,21 +218,23 @@ async function executeHardRuleAction(
 
 async function executeHandoff(
   conversationId: number,
-  intent: string,
   classification: Classification | null,
   reason: string,
   mode: AiMode,
 ): Promise<void> {
-  const topicLabel = getIntentTopicLabel(intent as import('../types/ai.js').Intent);
+  const primaryIntent = classification?.primary_intent ?? 'other';
+  const allIntents = classification?.intents ?? ['other' as Intent];
+  const topicLabels = getIntentTopicLabels(allIntents as Intent[]);
+
   const templateReason = reason === 'customer_wants_human' ? 'customer_wants_human'
     : reason === 'max_turns_reached' ? 'force_handoff'
     : undefined;
-  const template = getHandoffTemplate(intent as import('../types/ai.js').Intent, templateReason);
+  const template = getHandoffTemplate(primaryIntent as Intent, templateReason);
 
   const noteLines = ['AI HANDOFF NOTE', '---'];
   if (classification) {
     noteLines.push(
-      `Intent: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})`,
+      `Intents: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`,
       `Sentiment: ${classification.sentiment}`,
       `Escalation reason: ${reason}`,
     );
@@ -243,12 +244,14 @@ async function executeHandoff(
   }
   const privateNoteContent = noteLines.join('\n');
 
+  const allLabels = [...topicLabels, 'escalated'];
+
   if (mode === 'shadow') {
     const noteParts = [
       'SHADOW MODE — AI Pipeline Result',
       '---',
       classification
-        ? `Classification: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})`
+        ? `Classification: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`
         : 'Classification: FAILED',
       classification ? `Sentiment: ${classification.sentiment}` : '',
       `Route: Handoff (${reason})`,
@@ -263,7 +266,7 @@ async function executeHandoff(
       'WOULD HAVE POSTED AS PRIVATE NOTE:',
       privateNoteContent,
       '',
-      `WOULD HAVE APPLIED: labels [${topicLabel}, escalated], status → open`,
+      `WOULD HAVE APPLIED: labels [${allLabels.join(', ')}], status → open`,
     );
     await postPrivateNote(conversationId, noteParts.filter(Boolean).join('\n'));
     return;
@@ -274,10 +277,10 @@ async function executeHandoff(
     await sendOutgoingMessage(conversationId, template);
   }
   await postPrivateNote(conversationId, privateNoteContent);
-  await applyLabels(conversationId, [topicLabel, 'escalated']);
+  await applyLabels(conversationId, allLabels);
   await toggleConversationStatus(conversationId, 'open');
 
-  logger.info('Handoff executed', { conversationId, intent, reason, silent: !template });
+  logger.info('Handoff executed', { conversationId, primaryIntent, allIntents, reason, silent: !template });
 }
 
 async function executeAiResponse(
@@ -286,13 +289,13 @@ async function executeAiResponse(
   response: AiResponse,
   mode: AiMode,
 ): Promise<void> {
-  const topicLabel = getIntentTopicLabel(classification.intent);
+  const topicLabels = getIntentTopicLabels(classification.intents as Intent[]);
   const turn = incrementTurn(conversationId);
 
   const privateNoteContent = [
     'AI NOTE',
     '---',
-    `Intent: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})`,
+    `Intents: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`,
     `Sentiment: ${classification.sentiment} | Turn: ${turn} of ${MAX_AI_TURNS}`,
     '',
     response.private_note,
@@ -304,7 +307,7 @@ async function executeAiResponse(
     const note = [
       'SHADOW MODE — AI Pipeline Result',
       '---',
-      `Classification: ${classification.intent} (confidence: ${classification.confidence.toFixed(2)})`,
+      `Classification: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`,
       `Sentiment: ${classification.sentiment}`,
       `Route: AI-solvable → Responder`,
       '',
@@ -314,7 +317,7 @@ async function executeAiResponse(
       'WOULD HAVE POSTED AS PRIVATE NOTE:',
       privateNoteContent,
       '',
-      `WOULD HAVE APPLIED: labels [${topicLabel}]${response.resolved ? ', would resolve after 24h silence' : ''}`,
+      `WOULD HAVE APPLIED: labels [${topicLabels.join(', ')}]${response.resolved ? ', would resolve after 24h silence' : ''}`,
     ].join('\n');
     await postPrivateNote(conversationId, note);
     return;
@@ -323,7 +326,7 @@ async function executeAiResponse(
   // Live mode
   await sendOutgoingMessage(conversationId, response.customer_reply);
   await postPrivateNote(conversationId, privateNoteContent);
-  await applyLabels(conversationId, [topicLabel]);
+  await applyLabels(conversationId, topicLabels);
 
   if (response.resolved) {
     await applyLabels(conversationId, ['ai-resolved']);
@@ -331,7 +334,8 @@ async function executeAiResponse(
 
   logger.info('AI response sent', {
     conversationId,
-    intent: classification.intent,
+    intents: classification.intents,
+    primaryIntent: classification.primary_intent,
     turn,
     resolved: response.resolved,
   });

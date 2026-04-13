@@ -25,7 +25,8 @@ export async function classify(ctx: PipelineContext): Promise<Classification | n
 
   logger.info('Classification result', {
     conversationId: ctx.conversationId,
-    intent: result.intent,
+    intents: result.intents,
+    primaryIntent: result.primary_intent,
     sentiment: result.sentiment,
     confidence: result.confidence,
     customerWantsHuman: result.customer_wants_human,

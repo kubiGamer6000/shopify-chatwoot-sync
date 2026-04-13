@@ -178,6 +178,7 @@ Go to **Settings → Labels** and create these. Required for live mode (labels a
 | `change-address` | Blue | Topic |
 | `product-not-received` | Blue | Topic |
 | `product-defect` | Blue | Topic |
+| `business` | Purple | Topic |
 | `other` | Blue | Topic |
 | `ai-resolved` | Green | Handling |
 | `escalated` | Orange | Handling |

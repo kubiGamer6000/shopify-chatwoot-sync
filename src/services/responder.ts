@@ -20,7 +20,8 @@ export async function generateResponse(
 
   logger.info('Running responder', {
     conversationId: ctx.conversationId,
-    intent: classification.intent,
+    primaryIntent: classification.primary_intent,
+    intents: classification.intents,
   });
 
   const result = await structuredCall(systemPrompt, userPrompt, ResponseSchema);
