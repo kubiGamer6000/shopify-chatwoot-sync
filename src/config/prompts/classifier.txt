@@ -17,7 +17,7 @@ subscription_cancel: Customer wants to cancel their subscription (future recurri
 
 subscription_cancel_and_refund: Customer wants to cancel their subscription AND get money back for a past or current order. The refund component requires human handling. Examples:
   - "Cancel my subscription and refund my last order"
-  - "I want to stop my subscription, and I want my money back"
+  - "I want to stop my subscription, and I want my money back, why did you charge me"
   - "Cancel everything and give me a refund"
 
 subscription_change: Customer wants to modify their subscription (change frequency, product, quantity, pause, etc.) but NOT cancel. Examples:

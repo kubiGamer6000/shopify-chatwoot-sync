@@ -87,40 +87,114 @@ Go to your Chatwoot profile → Access Token. Copy it to `CHATWOOT_API_TOKEN`.
 
 ### 4. Configure the Chatwoot Webhook
 
-**For shadow mode** (default, recommended first step):
+The webhook URL is the same for both shadow and live mode:
 
-Go to **Settings → Integrations → Webhooks** and add:
+```
+https://<your-server>/chatwoot?secret=<YOUR_CHATWOOT_WEBHOOK_SECRET>
+```
 
-- **URL:** `https://<your-server>/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`
-- **Events:** Check `message_created`
+For example, if your server is at `https://shopify-chatwoot-sync-abc123.ondigitalocean.app` and your secret is `mysecret123`:
 
-This is a regular webhook — conversations flow to agents normally, and AI results appear as private notes.
+```
+https://shopify-chatwoot-sync-abc123.ondigitalocean.app/chatwoot?secret=mysecret123
+```
 
-### 5. Create Labels (for live mode)
+**The difference is *where* in Chatwoot you put this URL** — and that depends on which mode you're running.
 
-Go to **Settings → Labels** and create:
+---
 
-| Label | Color suggestion |
-|-------|-----------------|
-| `order-status` | Blue |
-| `subscription` | Blue |
-| `refund` | Blue |
-| `change-address` | Blue |
-| `product-issue` | Blue |
-| `other` | Blue |
-| `ai-resolved` | Green |
-| `escalated` | Orange |
-| `urgent` | Red |
+#### Step A: Shadow Mode (start here)
 
-### 6. Set Up Agent Bot (for live mode only)
+Shadow mode uses a **regular Chatwoot webhook**. Conversations flow to agents as normal. The AI pipeline runs in the background and posts its results as private notes only — agents can review what the AI would have done.
 
-When ready to switch from shadow to live mode:
+1. In Chatwoot, go to **Settings → Integrations → Webhooks**
+2. Click **Add New Webhook**
+3. Enter the URL: `https://<your-server>/chatwoot?secret=<YOUR_SECRET>`
+4. Check the **`message_created`** event
+5. Save
 
-1. Go to **Settings → Integrations → Agent Bots** (or create via API)
-2. Set `outgoing_url` to `https://<your-server>/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`
-3. Assign bot to your email inbox under **Settings → Inboxes → [Inbox] → Collaborators → Agent Bots**
-4. Set `AI_MODE=live` in your environment
-5. New conversations will now start as `pending` (invisible to agents until the bot hands off)
+That's it. Set `AI_MODE=shadow` in your server environment (this is the default). Deploy and every incoming customer message will get a private note showing the AI's classification and proposed response.
+
+**Nothing changes for agents or customers.** Agents see the private notes inline in conversations. Customers see nothing different.
+
+---
+
+#### Step B: Live Mode (after shadow validation)
+
+Live mode uses a **Chatwoot Agent Bot** instead of a regular webhook. The Agent Bot framework makes new conversations start as `pending` (hidden from agents), giving the bot control over which conversations humans see.
+
+**Before switching:** Review shadow mode results for 1-2 weeks. Check that classification accuracy and response quality are good.
+
+**To switch:**
+
+1. **Remove the regular webhook** you created in Step A (Settings → Integrations → Webhooks → delete it). Otherwise you'll get duplicate processing.
+
+2. **Create an Agent Bot:**
+   - Go to **Settings → Integrations → Agent Bots** (some Chatwoot versions: Settings → Applications → Agent Bots)
+   - Click **Add Agent Bot**
+   - Name: `Scandi AI` (or whatever you prefer)
+   - **Outgoing URL**: same URL as before — `https://<your-server>/chatwoot?secret=<YOUR_SECRET>`
+   - Save — Chatwoot will generate an **access token** for the bot (copy it if you want messages attributed to the bot)
+
+3. **Assign the bot to your inbox:**
+   - Go to **Settings → Inboxes**
+   - Click on your email inbox
+   - Go to the **Collaborators** tab
+   - Under **Agent Bot**, select the bot you just created
+   - Save
+
+4. **Set environment variables** on your server:
+   ```
+   AI_MODE=live
+   CHATWOOT_BOT_TOKEN=<the access token from step 2, optional>
+   ```
+
+5. **Redeploy** (or restart the server)
+
+Now new conversations will start as `pending`. The bot classifies, auto-responds to easy queries, and flips status to `open` for anything that needs a human. Agents only see conversations that are escalated to them.
+
+---
+
+#### Summary: What goes where
+
+| Mode | Where to configure the URL | Chatwoot location | `AI_MODE` |
+|------|---|---|---|
+| Shadow | Regular webhook | Settings → Integrations → Webhooks | `shadow` |
+| Live | Agent Bot outgoing URL | Settings → Integrations → Agent Bots | `live` |
+
+The URL itself (`https://<server>/chatwoot?secret=...`) is **identical** in both cases. The server code handles both regular webhook payloads and Agent Bot event payloads on the same endpoint.
+
+**Important:** Don't have both a regular webhook AND an Agent Bot pointing to the same URL at the same time — you'll get double-processing.
+
+### 5. Create Labels
+
+Go to **Settings → Labels** and create these. Required for live mode (labels are applied automatically). Optional but useful for shadow mode (for manual tagging during review).
+
+| Label | Color | Group |
+|-------|-------|-------|
+| `order-status` | Blue | Topic |
+| `subscription` | Blue | Topic |
+| `refund` | Blue | Topic |
+| `change-address` | Blue | Topic |
+| `product-not-received` | Blue | Topic |
+| `product-defect` | Blue | Topic |
+| `other` | Blue | Topic |
+| `ai-resolved` | Green | Handling |
+| `escalated` | Orange | Handling |
+| `urgent` | Red | Handling |
+
+**Sidebar visibility** (what agents see for quick filtering):
+- Show: `escalated`, `urgent`, `refund`, `product-issue`
+- Hide from sidebar (reporting only): `order-status`, `subscription`, `change-address`, `other`, `ai-resolved`
+
+### 6. Set Up Automation Rules (recommended for live mode)
+
+Go to **Settings → Automations** and create:
+
+| When | Condition | Action |
+|------|-----------|--------|
+| Conversation label added | `escalated` | Assign to team: [your support team] |
+| Conversation label added | `urgent` | Assign to team: [your support team], Send notification |
 
 ## Shopify Setup
 
@@ -169,6 +243,6 @@ The repo includes `.do/app.yaml` for DigitalOcean App Platform deployment:
 - **Health check:** `GET /health` (10s initial delay, 30s interval)
 - **Instance:** `apps-s-1vcpu-0.5gb`
 
-All environment variables should be configured as **secrets** in the DigitalOcean dashboard or app spec. The `.do/app.yaml` includes the Shopify and Chatwoot vars but **not** the AI/tracking vars (`ANTHROPIC_API_KEY`, `SEVENTEENTRACK_API_KEY`, `CHATWOOT_WEBHOOK_SECRET`, `CLAUDE_MODEL`, `CLAUDE_SYSTEM_PROMPT`). Add those manually in the dashboard.
+All environment variables should be configured as **secrets** in the DigitalOcean dashboard or app spec. The `.do/app.yaml` includes the Shopify and Chatwoot vars but **not** the AI/tracking vars (`ANTHROPIC_API_KEY`, `SEVENTEENTRACK_API_KEY`, `CHATWOOT_WEBHOOK_SECRET`, `AI_MODE`, `CLAUDE_MODEL`). Add those manually in the dashboard.
 
-**Important:** The system prompt file (`src/config/systemPrompt.txt`) is read at runtime relative to the project root. If your deployment copies `src/` alongside `dist/`, it will work automatically. Otherwise, set `CLAUDE_SYSTEM_PROMPT` as an environment variable.
+**Important:** The prompt files (`src/config/prompts/classifier.txt` and `responder.txt`) are read at runtime relative to the project root. If your deployment copies `src/` alongside `dist/`, they load automatically. Otherwise, set `CLASSIFIER_PROMPT` and `RESPONDER_PROMPT` as environment variables with the full prompt text.

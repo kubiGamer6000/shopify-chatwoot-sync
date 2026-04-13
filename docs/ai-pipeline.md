@@ -48,16 +48,20 @@ Only runs for AI-solvable intents. Uses the same model with a different system p
 | `subscription_cancel` | Cancel future recurring orders (no refund) |
 | `subscription_change` | Change frequency, product, pause |
 
-### Handoff-Only (template message + human)
+### Handoff-Only (silent escalation to human)
 
-| Intent | Description |
-|--------|-------------|
-| `subscription_cancel_and_refund` | Cancel + wants money back |
-| `refund_request` | Wants refund (not subscription-related) |
-| `change_address` | Update delivery address |
-| `product_not_received` | Claims non-delivery |
-| `product_defect` | Damaged/wrong product |
-| `other` | Doesn't match any category |
+Most handoffs are **silent** — no customer message is sent, just a private note + labels + status change. This avoids sending canned bot replies to business conversations, refund requests, etc.
+
+| Intent | Description | Customer message? |
+|--------|-------------|-------------------|
+| `subscription_cancel_and_refund` | Cancel + wants money back | No |
+| `refund_request` | Wants refund (not subscription-related) | No |
+| `change_address` | Update delivery address | Yes |
+| `product_not_received` | Claims non-delivery | No |
+| `product_defect` | Damaged/wrong product | No |
+| `other` | Doesn't match any category | No |
+
+Only `change_address` sends a customer message on handoff (acknowledging the request). Two special reasons also send a message: `customer_wants_human` ("Let me connect you…") and `force_handoff` (max turn ceiling reached).
 
 ## Routing Logic
 
@@ -68,7 +72,7 @@ The pipeline checks these conditions in order:
 3. **`sentiment = hostile`** → Immediate handoff
 4. **`confidence < 0.5`** → Treat as `other`, handoff
 5. **AI turn count >= 3** → Force handoff (3-response ceiling)
-6. **Handoff-only intent** → Template message + handoff
+6. **Handoff-only intent** → Silent handoff (no customer message, except `change_address`)
 7. **AI-solvable intent** → Run responder, send reply
 
 ## Playbooks
@@ -98,7 +102,7 @@ Same self-service link as cancel. If customer can't/won't use it → handoff.
 
 Applied programmatically by the pipeline:
 
-**Topic labels** (from classifier): `order-status`, `subscription`, `refund`, `change-address`, `product-issue`, `other`
+**Topic labels** (from classifier): `order-status`, `subscription`, `refund`, `change-address`, `product-not-received`, `product-defect`, `other`
 
 **Handling labels** (from pipeline): `ai-resolved`, `escalated`, `urgent`
 

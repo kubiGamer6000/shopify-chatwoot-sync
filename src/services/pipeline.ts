@@ -244,7 +244,7 @@ async function executeHandoff(
   const privateNoteContent = noteLines.join('\n');
 
   if (mode === 'shadow') {
-    const note = [
+    const noteParts = [
       'SHADOW MODE — AI Pipeline Result',
       '---',
       classification
@@ -253,25 +253,31 @@ async function executeHandoff(
       classification ? `Sentiment: ${classification.sentiment}` : '',
       `Route: Handoff (${reason})`,
       '',
-      'WOULD HAVE SENT TO CUSTOMER:',
-      `"${template}"`,
-      '',
+    ];
+    if (template) {
+      noteParts.push('WOULD HAVE SENT TO CUSTOMER:', `"${template}"`, '');
+    } else {
+      noteParts.push('Customer message: NONE (silent handoff)', '');
+    }
+    noteParts.push(
       'WOULD HAVE POSTED AS PRIVATE NOTE:',
       privateNoteContent,
       '',
       `WOULD HAVE APPLIED: labels [${topicLabel}, escalated], status → open`,
-    ].filter(Boolean).join('\n');
-    await postPrivateNote(conversationId, note);
+    );
+    await postPrivateNote(conversationId, noteParts.filter(Boolean).join('\n'));
     return;
   }
 
   // Live mode
-  await sendOutgoingMessage(conversationId, template);
+  if (template) {
+    await sendOutgoingMessage(conversationId, template);
+  }
   await postPrivateNote(conversationId, privateNoteContent);
   await applyLabels(conversationId, [topicLabel, 'escalated']);
   await toggleConversationStatus(conversationId, 'open');
 
-  logger.info('Handoff executed', { conversationId, intent, reason });
+  logger.info('Handoff executed', { conversationId, intent, reason, silent: !template });
 }
 
 async function executeAiResponse(
