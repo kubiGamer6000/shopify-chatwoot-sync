@@ -36,8 +36,11 @@ Only runs for AI-solvable intents. Uses the same model with a different system p
 |-------|------|---------|
 | `customer_reply` | string | The message to send to the customer |
 | `private_note` | string | Internal note for agents |
+| `needs_handoff` | boolean | If true, send the reply then immediately escalate (label `escalated`, status → `open`, AI stops) |
 | `resolved` | boolean | Whether the issue appears resolved |
 | `discount_applied` | boolean | Whether discount code SMILE5 was offered |
+
+When `needs_handoff` is true, the pipeline sends the customer reply (e.g. "I'll forward to a specialist"), then applies `escalated` label and sets status to `open`. **The AI stops responding** — all subsequent messages in that conversation are ignored because the `escalated` label is present.
 
 ## Intent Categories
 

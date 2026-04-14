@@ -62,6 +62,13 @@ export async function handleIncomingMessage(
     getContactConversations(contactId),
   ]);
 
+  // --- Phase 1.5: Skip if already escalated ---
+  const conversationLabels = conversationDetails.labels ?? [];
+  if (conversationLabels.includes('escalated')) {
+    logger.info('Skipping AI — conversation already escalated', { conversationId });
+    return;
+  }
+
   const currentMessages = messagesRes.payload;
   const customerName = conversationDetails.meta?.sender?.name;
   const email = conversationDetails.meta?.sender?.email || contactEmail;
@@ -291,17 +298,24 @@ async function executeAiResponse(
 ): Promise<void> {
   const topicLabels = getIntentTopicLabels(classification.intents as Intent[]);
   const turn = incrementTurn(conversationId);
+  const handoffRequested = response.needs_handoff;
 
+  const noteHeader = handoffRequested ? 'AI HANDOFF NOTE' : 'AI NOTE';
   const privateNoteContent = [
-    'AI NOTE',
+    noteHeader,
     '---',
     `Intents: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`,
     `Sentiment: ${classification.sentiment} | Turn: ${turn} of ${MAX_AI_TURNS}`,
+    handoffRequested ? 'ESCALATED TO HUMAN — AI will stop responding.' : '',
     '',
     response.private_note,
     response.discount_applied ? 'Discount code SMILE5 offered.' : '',
     response.resolved ? 'Marked as likely resolved.' : '',
   ].filter(Boolean).join('\n');
+
+  const allLabels = handoffRequested
+    ? [...topicLabels, 'escalated']
+    : [...topicLabels, ...(response.resolved ? ['ai-resolved'] : [])];
 
   if (mode === 'shadow') {
     const note = [
@@ -309,7 +323,7 @@ async function executeAiResponse(
       '---',
       `Classification: ${classification.intents.join(', ')} (primary: ${classification.primary_intent}, confidence: ${classification.confidence.toFixed(2)})`,
       `Sentiment: ${classification.sentiment}`,
-      `Route: AI-solvable → Responder`,
+      `Route: AI-solvable → Responder${handoffRequested ? ' → HANDOFF' : ''}`,
       '',
       'WOULD HAVE SENT TO CUSTOMER:',
       `"${response.customer_reply}"`,
@@ -317,7 +331,7 @@ async function executeAiResponse(
       'WOULD HAVE POSTED AS PRIVATE NOTE:',
       privateNoteContent,
       '',
-      `WOULD HAVE APPLIED: labels [${topicLabels.join(', ')}]${response.resolved ? ', would resolve after 24h silence' : ''}`,
+      `WOULD HAVE APPLIED: labels [${allLabels.join(', ')}]${handoffRequested ? ', status → open' : ''}`,
     ].join('\n');
     await postPrivateNote(conversationId, note);
     return;
@@ -326,19 +340,24 @@ async function executeAiResponse(
   // Live mode
   await sendOutgoingMessage(conversationId, response.customer_reply);
   await postPrivateNote(conversationId, privateNoteContent);
-  await applyLabels(conversationId, topicLabels);
+  await applyLabels(conversationId, allLabels);
 
-  if (response.resolved) {
-    await applyLabels(conversationId, ['ai-resolved']);
+  if (handoffRequested) {
+    await toggleConversationStatus(conversationId, 'open');
+    logger.info('Responder triggered handoff', {
+      conversationId,
+      intents: classification.intents,
+      turn,
+    });
+  } else {
+    logger.info('AI response sent', {
+      conversationId,
+      intents: classification.intents,
+      primaryIntent: classification.primary_intent,
+      turn,
+      resolved: response.resolved,
+    });
   }
-
-  logger.info('AI response sent', {
-    conversationId,
-    intents: classification.intents,
-    primaryIntent: classification.primary_intent,
-    turn,
-    resolved: response.resolved,
-  });
 }
 
 // ---------------------------------------------------------------------------

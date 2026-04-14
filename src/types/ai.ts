@@ -49,6 +49,7 @@ export type Classification = z.infer<typeof ClassificationSchema>;
 export const ResponseSchema = z.object({
   customer_reply: z.string(),
   private_note: z.string(),
+  needs_handoff: z.boolean(),
   resolved: z.boolean(),
   discount_applied: z.boolean(),
 });
