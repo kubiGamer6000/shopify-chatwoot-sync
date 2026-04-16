@@ -51,6 +51,7 @@ export const env = {
   claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6-20260320',
   classifierPrompt: process.env.CLASSIFIER_PROMPT || loadPromptFile('classifier.txt'),
   responderPrompt: process.env.RESPONDER_PROMPT || loadPromptFile('responder.txt'),
+  handoffDraftPrompt: process.env.HANDOFF_DRAFT_PROMPT || loadPromptFile('handoff-draft.txt'),
   seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
   aiMode: parseAiMode(process.env.AI_MODE),

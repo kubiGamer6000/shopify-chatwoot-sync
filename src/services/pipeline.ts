@@ -16,6 +16,7 @@ import { checkHardRules } from './hardRules.js';
 import { classify } from './classifier.js';
 import { generateResponse } from './responder.js';
 import { getHandoffTemplate, getIntentTopicLabels } from '../config/templates.js';
+import { generateHandoffDraft } from './handoffDraft.js';
 import type { PipelineContext } from '../utils/promptBuilder.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
@@ -148,39 +149,34 @@ export async function handleIncomingMessage(
   const classification = await classify(ctx);
   if (!classification) {
     logger.error('Classification failed, falling back to handoff', { conversationId });
-    await executeHandoff(conversationId, null, 'Classification failed — AI could not process this message.', mode);
+    await executeHandoff(conversationId, null, 'Classification failed — AI could not process this message.', mode, ctx);
     return;
   }
 
   // --- Phase 5: Route (based on primary_intent, labels from all intents) ---
   if (classification.customer_wants_human) {
-    await executeHandoff(
-      conversationId,
-      classification,
-      'customer_wants_human',
-      mode,
-    );
+    await executeHandoff(conversationId, classification, 'customer_wants_human', mode, ctx);
     return;
   }
 
   if (classification.sentiment === 'hostile') {
-    await executeHandoff(conversationId, classification, 'hostile_sentiment', mode);
+    await executeHandoff(conversationId, classification, 'hostile_sentiment', mode, ctx);
     return;
   }
 
   if (classification.confidence < CONFIDENCE_THRESHOLD) {
-    await executeHandoff(conversationId, classification, 'low_confidence', mode);
+    await executeHandoff(conversationId, classification, 'low_confidence', mode, ctx);
     return;
   }
 
   const currentTurn = getTurnCount(conversationId);
   if (currentTurn >= MAX_AI_TURNS) {
-    await executeHandoff(conversationId, classification, 'max_turns_reached', mode);
+    await executeHandoff(conversationId, classification, 'max_turns_reached', mode, ctx);
     return;
   }
 
   if (!AI_SOLVABLE_INTENTS.has(classification.primary_intent)) {
-    await executeHandoff(conversationId, classification, 'handoff_intent', mode);
+    await executeHandoff(conversationId, classification, 'handoff_intent', mode, ctx);
     return;
   }
 
@@ -188,12 +184,12 @@ export async function handleIncomingMessage(
   const response = await generateResponse(ctx, classification);
   if (!response) {
     logger.error('Responder failed, falling back to handoff', { conversationId });
-    await executeHandoff(conversationId, classification, 'responder_failed', mode);
+    await executeHandoff(conversationId, classification, 'responder_failed', mode, ctx);
     return;
   }
 
   // --- Phase 7: Execute actions ---
-  await executeAiResponse(conversationId, classification, response, mode);
+  await executeAiResponse(conversationId, classification, response, mode, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +224,7 @@ async function executeHandoff(
   classification: Classification | null,
   reason: string,
   mode: AiMode,
+  ctx: PipelineContext,
 ): Promise<void> {
   const primaryIntent = classification?.primary_intent ?? 'other';
   const allIntents = classification?.intents ?? ['other' as Intent];
@@ -253,6 +250,9 @@ async function executeHandoff(
 
   const allLabels = [...topicLabels, 'escalated'];
 
+  // Generate draft reply suggestion for the human agent
+  const draft = await generateHandoffDraft(ctx, classification);
+
   if (mode === 'shadow') {
     const noteParts = [
       'SHADOW MODE — AI Pipeline Result',
@@ -273,6 +273,11 @@ async function executeHandoff(
       'WOULD HAVE POSTED AS PRIVATE NOTE:',
       privateNoteContent,
       '',
+    );
+    if (draft) {
+      noteParts.push('AI DRAFT (suggested reply for agent):', `"${draft}"`, '');
+    }
+    noteParts.push(
       `WOULD HAVE APPLIED: labels [${allLabels.join(', ')}], status → open`,
     );
     await postPrivateNote(conversationId, noteParts.filter(Boolean).join('\n'));
@@ -284,10 +289,13 @@ async function executeHandoff(
     await sendOutgoingMessage(conversationId, template);
   }
   await postPrivateNote(conversationId, privateNoteContent);
+  if (draft) {
+    await postPrivateNote(conversationId, `AI DRAFT\n---\n${draft}`);
+  }
   await applyLabels(conversationId, allLabels);
   await toggleConversationStatus(conversationId, 'open');
 
-  logger.info('Handoff executed', { conversationId, primaryIntent, allIntents, reason, silent: !template });
+  logger.info('Handoff executed', { conversationId, primaryIntent, allIntents, reason, silent: !template, hasDraft: !!draft });
 }
 
 async function executeAiResponse(
@@ -295,6 +303,7 @@ async function executeAiResponse(
   classification: Classification,
   response: AiResponse,
   mode: AiMode,
+  ctx: PipelineContext,
 ): Promise<void> {
   const topicLabels = getIntentTopicLabels(classification.intents as Intent[]);
   const turn = incrementTurn(conversationId);
@@ -343,11 +352,16 @@ async function executeAiResponse(
   await applyLabels(conversationId, allLabels);
 
   if (handoffRequested) {
+    const draft = await generateHandoffDraft(ctx, classification);
+    if (draft) {
+      await postPrivateNote(conversationId, `AI DRAFT\n---\n${draft}`);
+    }
     await toggleConversationStatus(conversationId, 'open');
     logger.info('Responder triggered handoff', {
       conversationId,
       intents: classification.intents,
       turn,
+      hasDraft: !!draft,
     });
   } else {
     logger.info('AI response sent', {
