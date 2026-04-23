@@ -4,10 +4,11 @@
 src/
 ├── config/
 │   ├── env.ts                    # Environment config and validation
-│   ├── templates.ts              # Handoff template messages per intent
+│   ├── templates.ts              # Handoff customer-message templates + intent→label map
 │   └── prompts/
 │       ├── classifier.txt        # Classifier system prompt (intent definitions)
-│       └── responder.txt         # Responder system prompt (playbooks)
+│       ├── responder.txt         # Responder system prompt (playbooks)
+│       └── handoff-draft.txt     # Handoff draft system prompt (brand rules, refund policy)
 ├── middleware/
 │   ├── verifyShopifyWebhook.ts   # HMAC verification
 │   ├── syncAuth.ts               # Bearer token auth
@@ -16,16 +17,19 @@ src/
 │   ├── webhooks.ts               # Shopify webhook handlers
 │   ├── sync.ts                   # Manual sync trigger
 │   └── chatwootWebhook.ts        # Chatwoot webhook → AI pipeline
+├── scripts/
+│   └── bulkDraft.ts              # CLI: bulk-generate drafts for all open conversations
 ├── services/
 │   ├── shopifyAuth.ts            # OAuth token management
 │   ├── shopify.ts                # Shopify REST API client
 │   ├── chatwoot.ts               # Chatwoot API client (contacts)
-│   ├── chatwootConversation.ts   # Chatwoot API client (conversations, messages, labels, status)
+│   ├── chatwootConversation.ts   # Chatwoot API (conversations, messages, labels, status)
 │   ├── sync.ts                   # Full sync logic and scheduler
 │   ├── tracking.ts               # 17track API client
-│   ├── claude.ts                 # Claude structured output call
+│   ├── claude.ts                 # Generic Claude structured output call
 │   ├── classifier.ts             # Call 1: intent classification
 │   ├── responder.ts              # Call 2: response generation
+│   ├── handoffDraft.ts           # Call 3: draft reply suggestion for agent
 │   ├── pipeline.ts               # Main AI orchestrator
 │   └── hardRules.ts              # Pre-AI rule checks
 ├── types/
@@ -35,7 +39,7 @@ src/
 │   └── ai.ts                     # Classification + Response Zod schemas
 ├── utils/
 │   ├── formatters.ts             # Data formatting utilities
-│   ├── promptBuilder.ts          # Context assembly for classifier and responder
+│   ├── promptBuilder.ts          # Context assembly for all Claude calls
 │   └── logger.ts                 # Structured console logger
 ├── app.ts                        # Express app setup and routing
 └── server.ts                     # Entry point
@@ -51,23 +55,27 @@ src/
 
 ### Config
 
-**`src/config/env.ts`** — Validates required environment variables at startup, exports a typed `env` object. Key additions: `AI_MODE` (shadow/live/off), `chatwootBotToken`, `classifierPrompt`, `responderPrompt`.
+**`src/config/env.ts`** — Validates required environment variables at startup, exports a typed `env` object. Loads prompt files from `src/config/prompts/` at startup (overridable via `CLASSIFIER_PROMPT`, `RESPONDER_PROMPT`, `HANDOFF_DRAFT_PROMPT` env vars).
 
-**`src/config/templates.ts`** — Handoff template messages keyed by intent. Also maps intents to Chatwoot topic labels. No AI generation needed for these — they're static templates.
+**`src/config/templates.ts`** — Customer-message handoff templates (only 3: `change_address`, `customer_wants_human`, `force_handoff` — most handoffs are silent). Also exports `getIntentTopicLabels()` which maps an array of intents to a deduped list of Chatwoot topic labels.
 
-**`src/config/prompts/classifier.txt`** — System prompt for the classification call. Defines all 9 intents with descriptions and examples, confidence scoring rules, and the `other` label hard rule.
+**`src/config/prompts/classifier.txt`** — System prompt for the classification call. Defines all 10 intents with examples, confidence rules, multi-intent rules, and sentiment categories.
 
-**`src/config/prompts/responder.txt`** — System prompt for the response generation call. Contains the "Andrew" persona, brand voice rules, and playbooks for order_status, subscription_cancel, and subscription_change.
+**`src/config/prompts/responder.txt`** — System prompt for the response generation call. Contains the "Andrew" persona, brand voice rules, playbooks for order_status / subscription_cancel / subscription_change, and `needs_handoff` rules.
+
+**`src/config/prompts/handoff-draft.txt`** — System prompt for the draft reply generation on handoffs. Contains brand context, refund policy, shipping excuses, discount codes, product FAQs — basically the full operational playbook. Agent reviews and sends.
 
 ### Services (AI Pipeline)
 
-**`src/services/pipeline.ts`** — The main orchestrator. Handles the full lifecycle: hard rules check → context fetch → classify → route → respond/handoff → post results. Branches on `AI_MODE` at the action stage — shadow mode posts a combined private note, live mode sends real replies. Includes the in-memory turn counter.
+**`src/services/pipeline.ts`** — The main orchestrator. Skip-if-escalated → hard rules → context fetch → classify → route → respond/handoff → generate draft (on handoff) → post results. Branches on `AI_MODE` at the action stage — shadow mode posts a combined private note, live mode sends real replies. Includes the in-memory turn counter.
 
-**`src/services/classifier.ts`** — Assembles the classifier prompt with conversation context and calls Claude via structured output. Returns a typed `Classification` object.
+**`src/services/classifier.ts`** — Assembles the classifier prompt with conversation context and calls Claude via structured output. Returns a typed `Classification` object (intents array + primary intent + flags).
 
-**`src/services/responder.ts`** — Assembles the responder prompt with full context (including classifier output) and calls Claude via structured output. Returns a typed `AiResponse` object with both customer reply and private note.
+**`src/services/responder.ts`** — Assembles the responder prompt with full context (including classifier output) and calls Claude via structured output. Returns a typed `AiResponse` with customer reply, private note, and `needs_handoff` flag.
 
-**`src/services/claude.ts`** — Generic `structuredCall<T>()` function. Takes a system prompt, user prompt, and Zod schema, calls Claude with `output_config.format` using the SDK's `zodOutputFormat` helper. Validates the response against the schema before returning.
+**`src/services/handoffDraft.ts`** — Plain-text Claude call (no schema) that generates a suggested reply for the human agent whenever a conversation is handed off. Posted as an `AI DRAFT` private note.
+
+**`src/services/claude.ts`** — Generic `structuredCall<T>()` function. Takes a system prompt, user prompt, and Zod schema, calls Claude with `output_config.format` using the SDK's `zodOutputFormat` helper. Validates response against schema.
 
 **`src/services/hardRules.ts`** — Pre-AI code checks. Currently checks for unfulfilled orders older than 14 days, which trigger immediate human handoff without any AI call.
 
@@ -110,3 +118,7 @@ src/
 **`src/routes/webhooks.ts`** — Shopify customer and order webhooks. Syncs customer to Chatwoot, registers tracking numbers with 17track.
 
 **`src/routes/sync.ts`** — Manual full sync trigger. Returns 409 if already running.
+
+### Scripts
+
+**`src/scripts/bulkDraft.ts`** — Standalone CLI tool. Fetches all open Chatwoot conversations, filters to those still waiting on the customer's last message (ignoring private notes and activity events), calls Claude with a custom prompt, and posts each reply as an `AI DRAFT` private note. Useful for catching up on a backlog. See [Scripts](scripts.md) for usage.

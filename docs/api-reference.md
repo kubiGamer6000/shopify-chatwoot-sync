@@ -70,12 +70,14 @@ Receives Chatwoot webhook events (regular webhooks or Agent Bot events) and runs
 1. Returns `200` immediately.
 2. If `AI_MODE=off`, stops.
 3. Filters to `message_created` (incoming, non-private) and `conversation_created` events.
-4. Runs the AI pipeline asynchronously:
+4. Skips if the conversation already has the `escalated` label.
+5. Runs the AI pipeline asynchronously:
    - Checks hard rules (14+ day unfulfilled orders)
    - Classifies intent via Claude structured output
-   - Routes to responder (AI-solvable) or template handoff
+   - Routes to responder (AI-solvable) or handoff
+   - On handoff: generates a draft reply for the agent via Claude plain-text call
    - In **shadow mode**: posts all results as a single private note
-   - In **live mode**: sends customer reply, posts private note, applies labels, changes status
+   - In **live mode**: sends customer reply, posts metadata + draft private notes, applies labels, changes status
 
 **Response:** Always `200 { "received": true }` (processing is async)
 
@@ -120,10 +122,14 @@ In your Chatwoot instance under **Settings → Integrations → Webhooks**:
   - `POST /contacts/filter` — Exact-match contact lookup
   - `POST /contacts` — Create a new contact
   - `PUT /contacts/{id}` — Update a contact
-  - `GET /conversations/{id}/messages` — Get conversation messages
+  - `GET /conversations` — List conversations by status (used by bulk draft script)
   - `GET /conversations/{id}` — Get conversation details
+  - `GET /conversations/{id}/messages` — Get conversation messages
   - `GET /contacts/{id}/conversations` — Get all conversations for a contact
-  - `POST /conversations/{id}/messages` — Post a message (used for private notes)
+  - `POST /conversations/{id}/messages` — Post a message (public reply or private note)
+  - `POST /conversations/{id}/toggle_status` — Change conversation status (pending ↔ open)
+  - `GET /conversations/{id}/labels` — Get current labels
+  - `POST /conversations/{id}/labels` — Apply labels
 
 ### 17track API
 
@@ -137,5 +143,6 @@ In your Chatwoot instance under **Settings → Integrations → Webhooks**:
 ### Anthropic Messages API
 
 - **Auth:** API key via SDK
-- **Model:** Configurable, default `claude-sonnet-4-20250514`
+- **Model:** Configurable, default `claude-sonnet-4-6-20260320`
+- **Used for:** classifier (structured output), responder (structured output), handoff draft (plain text)
 - **Max tokens:** 2048

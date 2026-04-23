@@ -1,8 +1,8 @@
 # AI Support Pipeline
 
-The server uses a two-call Claude architecture with structured output to classify customer intent and generate responses. Easy queries are answered automatically; everything else gets a warm handoff to human agents.
+The server uses a three-call Claude architecture with structured output to classify customer intent, generate responses, and draft suggested replies on handoffs. Easy queries are answered automatically; everything else gets a silent handoff to human agents — with a draft reply suggestion so the agent can move fast.
 
-## Two-Call Architecture
+## Three-Call Architecture
 
 ### Call 1: Classifier
 
@@ -42,6 +42,20 @@ Only runs for AI-solvable intents. Uses the same model with a different system p
 
 When `needs_handoff` is true, the pipeline sends the customer reply (e.g. "I'll forward to a specialist"), then applies `escalated` label and sets status to `open`. **The AI stops responding** — all subsequent messages in that conversation are ignored because the `escalated` label is present.
 
+### Call 3: Handoff Draft (on every escalation)
+
+Whenever the pipeline hands off to a human — for any reason (classifier routed to handoff-only intent, low confidence, hostile sentiment, `customer_wants_human`, max turns, responder set `needs_handoff`, or classification failed) — a plain-text Claude call generates a suggested reply for the agent to review.
+
+**Input:** System prompt (`src/config/prompts/handoff-draft.txt`) + full responder-style context (customer, orders, tracking, conversation)
+
+**Output:** Plain text draft reply — posted as a second private note labeled `AI DRAFT`.
+
+The agent sees two private notes:
+1. `AI HANDOFF NOTE` — metadata (intents, sentiment, reason, reasoning)
+2. `AI DRAFT` — a ready-to-copy draft reply
+
+The draft is just a suggestion; the agent always reviews/edits before sending. This call uses plain text output (no schema), and is the place where domain-specific policies live (refund rules, shipping excuses, etc.).
+
 ## Intent Categories
 
 9 intents, mapped to two groups:
@@ -74,13 +88,16 @@ Only `change_address` sends a customer message on handoff (acknowledging the req
 
 The pipeline checks these conditions in order:
 
-1. **Hard rule: unfulfilled order > 14 days** → Skip AI, urgent human handoff
-2. **`customer_wants_human = true`** → Immediate handoff regardless of intent
-3. **`sentiment = hostile`** → Immediate handoff
-4. **`confidence < 0.5`** → Treat as `other`, handoff
-5. **AI turn count >= 3** → Force handoff (3-response ceiling)
-6. **Handoff-only intent** → Silent handoff (no customer message, except `change_address`)
-7. **AI-solvable intent** → Run responder, send reply
+1. **Already escalated** (conversation has `escalated` label) → Skip entirely, do nothing
+2. **Hard rule: unfulfilled order > 14 days** → Skip AI, urgent human handoff
+3. **`customer_wants_human = true`** → Immediate handoff regardless of intent
+4. **`sentiment = hostile`** → Immediate handoff
+5. **`confidence < 0.5`** → Handoff as `other`
+6. **AI turn count >= 3** → Force handoff (3-response ceiling)
+7. **Handoff-only intent** → Silent handoff (no customer message, except `change_address`)
+8. **AI-solvable intent** → Run responder, send reply
+
+Every handoff — regardless of reason — also runs Call 3 and posts the draft reply as a private note.
 
 ## Playbooks
 
@@ -169,9 +186,9 @@ Shadow mode uses the existing Chatwoot webhook (not Agent Bot), so no Chatwoot c
 
 ## Private Note Format
 
-Every AI action posts a structured private note for agent visibility.
+Every AI action posts structured private notes for agent visibility.
 
-**AI-handled messages:**
+**AI-handled messages (one note):**
 ```
 AI NOTE
 ---
@@ -182,7 +199,9 @@ Sent tracking link for order #1042.
 Order fulfilled Apr 10, tracking: LY123456789SE
 ```
 
-**Handoff messages:**
+**Handoffs (two notes):**
+
+Note 1 — metadata for context:
 ```
 AI HANDOFF NOTE
 ---
@@ -190,4 +209,20 @@ Intents: subscription_cancel, refund_request (primary: refund_request, confidenc
 Sentiment: negative
 Escalation reason: handoff_intent
 Reasoning: Customer wants to cancel subscription and also requesting refund for last charge.
+```
+
+Note 2 — draft reply the agent can copy/edit/send:
+```
+AI DRAFT
+---
+Hi Anna,
+
+I completely understand wanting to cancel — I've gone ahead and stopped
+your subscription, so no further charges or orders will be sent.
+
+Regarding the refund for your last order, unfortunately it's already
+entered our shipping pipeline and can no longer be cancelled or refunded
+at this stage. I'm sorry for the inconvenience.
+
+Kind regards, Andrew, Scandi Support
 ```

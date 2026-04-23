@@ -39,9 +39,10 @@ cp .env.example .env
 | `SYNC_API_KEY` | — | Bearer token to protect `POST /sync/customers`. If unset, the endpoint is open. |
 | `SYNC_INTERVAL_HOURS` | `0` (disabled) | How often to run the periodic background sync. Set to `6` for every 6 hours. |
 | `PORT` | `8080` | Server port |
-| `CLAUDE_MODEL` | `claude-sonnet-4-6-20260320` | Anthropic model to use for both classification and response |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6-20260320` | Anthropic model to use for all Claude calls |
 | `CLASSIFIER_PROMPT` | contents of `src/config/prompts/classifier.txt` | Override the classifier system prompt via env var |
 | `RESPONDER_PROMPT` | contents of `src/config/prompts/responder.txt` | Override the responder system prompt via env var |
+| `HANDOFF_DRAFT_PROMPT` | contents of `src/config/prompts/handoff-draft.txt` | Override the handoff draft system prompt via env var |
 | `CHATWOOT_WEBHOOK_SECRET` | — | Secret for the Chatwoot webhook URL query string. If set, requests to `POST /chatwoot` must include `?secret=<value>`. |
 | `DEBUG` | — | Set to any value to enable debug logging |
 
@@ -185,7 +186,7 @@ Go to **Settings → Labels** and create these. Required for live mode (labels a
 | `urgent` | Red | Handling |
 
 **Sidebar visibility** (what agents see for quick filtering):
-- Show: `escalated`, `urgent`, `refund`, `product-issue`
+- Show: `escalated`, `urgent`, `refund`, `product-not-received`, `product-defect`, `business`
 - Hide from sidebar (reporting only): `order-status`, `subscription`, `change-address`, `other`, `ai-resolved`
 
 ### 6. Set Up Automation Rules (recommended for live mode)
@@ -246,4 +247,8 @@ The repo includes `.do/app.yaml` for DigitalOcean App Platform deployment:
 
 All environment variables should be configured as **secrets** in the DigitalOcean dashboard or app spec. The `.do/app.yaml` includes the Shopify and Chatwoot vars but **not** the AI/tracking vars (`ANTHROPIC_API_KEY`, `SEVENTEENTRACK_API_KEY`, `CHATWOOT_WEBHOOK_SECRET`, `AI_MODE`, `CLAUDE_MODEL`). Add those manually in the dashboard.
 
-**Important:** The prompt files (`src/config/prompts/classifier.txt` and `responder.txt`) are read at runtime relative to the project root. If your deployment copies `src/` alongside `dist/`, they load automatically. Otherwise, set `CLASSIFIER_PROMPT` and `RESPONDER_PROMPT` as environment variables with the full prompt text.
+**Important:** The prompt files (`src/config/prompts/classifier.txt`, `responder.txt`, `handoff-draft.txt`) are read at runtime relative to the project root. If your deployment copies `src/` alongside `dist/`, they load automatically. Otherwise, set `CLASSIFIER_PROMPT`, `RESPONDER_PROMPT`, and `HANDOFF_DRAFT_PROMPT` as environment variables with the full prompt text.
+
+## CLI Scripts
+
+The repo includes `src/scripts/bulkDraft.ts` for generating AI draft replies across all open conversations in one batch — useful for catching up after downtime or onboarding the tool. See [Scripts](scripts.md) for usage.

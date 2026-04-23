@@ -15,23 +15,28 @@ The server is an Express application (TypeScript, Node 22) that acts as middlewa
 
 Shopify webhooks fire on customer/order events. The server fetches all orders, builds custom attributes, and upserts the Chatwoot contact. A periodic background sync fills gaps. See [Shopify Sync](shopify-sync.md) for details.
 
-### Flow 2: AI Support Pipeline (Two-Call Architecture)
+### Flow 2: AI Support Pipeline (Three-Call Architecture)
 
 When a customer sends a message in Chatwoot:
 
 ```
 Message arrives
+  → Skip if already escalated (escalated label present)
   → Hard rules check (14+ day unfulfilled → immediate human handoff)
   → Fetch context (Chatwoot + Shopify + 17track, parallel)
-  → Call 1: Classifier (Sonnet 4.6, structured output)
-      → Returns: intent, sentiment, confidence, customer_wants_human, involves_refund
+  → Call 1: Classifier (structured output)
+      → Returns: intents[], primary_intent, sentiment, confidence, flags
   → Route based on classification:
       AI-solvable (order_status, subscription_cancel, subscription_change)
-        → Call 2: Responder (Sonnet 4.6, structured output)
-        → Returns: customer_reply + private_note + resolved + discount_applied
-      Handoff-only (all others, low confidence, hostile, wants human)
-        → Template message + status → open
-  → Execute actions (send reply, post note, apply labels, change status)
+        → Call 2: Responder (structured output)
+        → Returns: customer_reply + private_note + needs_handoff + resolved
+        → If needs_handoff: send reply + Call 3 draft + escalate
+      Handoff-only (everything else)
+        → Optional customer message (change_address only)
+        → Call 3: Handoff Draft (plain text)
+        → Returns: suggested reply for the agent
+        → Post both notes, label as escalated, status → open
+  → Execute actions (send reply, post notes, apply labels, change status)
 ```
 
 See [AI Pipeline](ai-pipeline.md) for the full specification.
