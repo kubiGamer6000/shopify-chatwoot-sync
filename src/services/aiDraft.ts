@@ -34,6 +34,16 @@ export async function handleIncomingMessage(
   const customerName = conversationDetails.meta?.sender?.name;
   const email = conversationDetails.meta?.sender?.email || contactEmail;
 
+  // Extract email subject: conversation-level first, then fall back to first message
+  const mailSubject =
+    (conversationDetails.additional_attributes?.['mail_subject'] as string) ||
+    currentMessages
+      .filter((m) => m.message_type === 0)
+      .sort((a, b) => a.created_at - b.created_at)
+      .map((m) => (m.content_attributes as Record<string, any>)?.email?.subject)
+      .find(Boolean) ||
+    undefined;
+
   // Determine if this is a new conversation (only 1 incoming message so far)
   const incomingCount = currentMessages.filter((m) => m.message_type === 0 && !m.private).length;
   const isNewConversation = incomingCount <= 1;
@@ -106,6 +116,7 @@ export async function handleIncomingMessage(
     previousConversations: contactConversations,
     conversationId,
     isNewConversation,
+    emailSubject: mailSubject,
   });
 
   const systemPrompt = env.claudeSystemPrompt;

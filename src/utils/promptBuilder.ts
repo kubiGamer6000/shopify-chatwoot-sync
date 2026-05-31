@@ -13,6 +13,7 @@ export interface PromptContext {
   previousConversations: ChatwootConversation[];
   conversationId: number;
   isNewConversation: boolean;
+  emailSubject?: string;
 }
 
 export function buildPrompt(ctx: PromptContext): string {
@@ -23,7 +24,7 @@ export function buildPrompt(ctx: PromptContext): string {
   sections.push(buildCustomerSection(ctx));
   sections.push(buildOrderSection(ctx.orders));
   sections.push(buildTrackingSection(ctx.orders, ctx.trackingByNumber));
-  sections.push(buildCurrentConversationSection(ctx.currentMessages));
+  sections.push(buildCurrentConversationSection(ctx.currentMessages, ctx.emailSubject));
   sections.push(buildPreviousConversationsSection(ctx.previousConversations, ctx.conversationId));
 
   return sections.filter(Boolean).join('\n\n');
@@ -139,7 +140,7 @@ function buildTrackingSection(
   return `--- TRACKING (Last 2 Orders) ---\n${lines.filter(Boolean).join('\n')}`;
 }
 
-function buildCurrentConversationSection(messages: ChatwootMessage[]): string {
+function buildCurrentConversationSection(messages: ChatwootMessage[], emailSubject?: string): string {
   if (messages.length === 0) return '--- CURRENT CONVERSATION ---\nNo messages.';
 
   const sorted = [...messages].sort((a, b) => a.created_at - b.created_at);
@@ -153,7 +154,8 @@ function buildCurrentConversationSection(messages: ChatwootMessage[]): string {
       return `[${time}] ${role}: ${content}`;
     });
 
-  return `--- CURRENT CONVERSATION ---\n${lines.join('\n')}`;
+  const subjectLine = emailSubject ? `Subject: ${emailSubject}\n` : '';
+  return `--- CURRENT CONVERSATION ---\n${subjectLine}${lines.join('\n')}`;
 }
 
 function buildPreviousConversationsSection(
