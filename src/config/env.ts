@@ -48,4 +48,5 @@ export const env = {
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
   skioApiKey: process.env.SKIO_API_KEY!,
   dashboardAppToken: process.env.DASHBOARD_APP_TOKEN || '',
+  firebaseServiceAccountBase64: process.env.FIREBASE_BASE64_SERVICE_ACCOUNT || '',
 };

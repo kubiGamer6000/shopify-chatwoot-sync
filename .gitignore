@@ -5,3 +5,4 @@ dist/
 local-scripts/
 web/node_modules/
 web/dist/
+service-acc.json

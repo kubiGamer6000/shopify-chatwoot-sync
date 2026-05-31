@@ -15,6 +15,9 @@ export interface TrackEvent {
   description: string;
   location?: string;
   stage?: string;
+  sub_status?: string;
+  // Carrier that reported this event (set when merging multiple providers).
+  provider?: string;
 }
 
 export interface TrackMilestone {
@@ -89,5 +92,11 @@ export interface TrackingSummary {
   lastLocation?: string;
   lastUpdate?: string;
   estimatedDelivery?: { from: string; to: string };
+  carrier?: string;
+  daysInTransit?: number;
+  daysAfterOrder?: number;
+  originCountry?: string;
+  destinationCountry?: string;
+  // Full chronological history (newest first), merged across all carriers.
   events: TrackEvent[];
 }

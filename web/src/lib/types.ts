@@ -15,8 +15,12 @@ export type SubscriptionOrderType = 'first' | 'recurring' | null;
 
 export interface TrackingEvent {
   time_iso?: string;
+  time_utc?: string;
   description?: string;
   location?: string;
+  stage?: string;
+  sub_status?: string;
+  provider?: string;
 }
 
 export interface TrackingSummary {
@@ -26,6 +30,11 @@ export interface TrackingSummary {
   lastLocation?: string;
   lastUpdate?: string;
   estimatedDelivery?: { from?: string; to?: string };
+  carrier?: string;
+  daysInTransit?: number;
+  daysAfterOrder?: number;
+  originCountry?: string;
+  destinationCountry?: string;
   events: TrackingEvent[];
 }
 
@@ -101,6 +110,7 @@ export interface CustomerProfile {
   };
   orders: OrderDTO[];
   subscriptions: SubscriptionDTO[];
+  aiSummary?: CustomerSummary | null;
 }
 
 // --- Chatwoot appContext payload ---
@@ -136,7 +146,19 @@ export interface ChatwootAppContext {
 
 export interface ResolvedContext {
   conversationId: number | null;
+  contactId: number | null;
   shopifyCustomerId: string | null;
   email: string | null;
   contactName: string | null;
+}
+
+export interface CustomerSummary {
+  contactId: number;
+  email: string | null;
+  shopifyCustomerId: string | null;
+  conversationId: number | null;
+  overview: string;
+  history: string;
+  model: string;
+  generatedAt: string;
 }

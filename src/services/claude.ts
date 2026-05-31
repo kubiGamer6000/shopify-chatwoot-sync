@@ -38,3 +38,42 @@ export async function generateDraft(
     return null;
   }
 }
+
+/**
+ * Generic single-shot completion. Used for the customer summary (and reusable
+ * for other internal AI features). Returns the text content or null on failure.
+ */
+export async function generateCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+  options: { maxTokens?: number; model?: string } = {},
+): Promise<string | null> {
+  try {
+    const response = await client.messages.create({
+      model: options.model ?? env.claudeModel,
+      max_tokens: options.maxTokens ?? 1500,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+
+    const textBlock = response.content.find((b) => b.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') {
+      logger.warn('Claude completion returned no text content', {
+        stopReason: response.stop_reason,
+      });
+      return null;
+    }
+
+    logger.info('Claude completion generated', {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    });
+
+    return textBlock.text;
+  } catch (err) {
+    logger.error('Claude completion API error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}

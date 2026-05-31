@@ -9,6 +9,10 @@ import {
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
 import { generateDraft } from './claude.js';
+import {
+  gatherConversationsWithMessages,
+  generateAndStoreSummary,
+} from './customerSummary.js';
 import { buildPrompt } from '../utils/promptBuilder.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
@@ -140,6 +144,49 @@ export async function handleIncomingMessage(
   // Phase 5: Post as private note
   await postPrivateNote(conversationId, draft);
   logger.info('AI draft posted successfully', { conversationId });
+
+  // Phase 6: Refresh the stored customer AI summary (best-effort).
+  // The webhook has already responded 200, so this runs in the background and
+  // must never throw out of this function.
+  await generateCustomerSummarySafely({
+    contactId,
+    conversationId,
+    email,
+    shopifyCustomer,
+    shopifyCustomerId,
+    customerName,
+    orders,
+  });
+}
+
+async function generateCustomerSummarySafely(params: {
+  contactId: number;
+  conversationId: number;
+  email?: string;
+  shopifyCustomer: ShopifyCustomer | null;
+  shopifyCustomerId?: string;
+  customerName?: string;
+  orders: ShopifyOrder[];
+}): Promise<void> {
+  try {
+    const conversations = await gatherConversationsWithMessages(params.contactId);
+    await generateAndStoreSummary({
+      contactId: params.contactId,
+      conversationId: params.conversationId,
+      email: params.email ?? null,
+      shopifyCustomerId: params.shopifyCustomer?.id
+        ? String(params.shopifyCustomer.id)
+        : (params.shopifyCustomerId ?? null),
+      customerName: params.customerName ?? null,
+      orders: params.orders,
+      conversations,
+    });
+  } catch (err) {
+    logger.warn('Customer summary generation failed', {
+      conversationId: params.conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function extractTrackingNumbers(orders: ShopifyOrder[]): string[] {

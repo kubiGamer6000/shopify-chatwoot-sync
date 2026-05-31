@@ -12,7 +12,9 @@ import { ProfileHeader } from '@/components/ProfileHeader';
 import { SummaryRow } from '@/components/SummaryRow';
 import { OrdersList } from '@/components/OrdersList';
 import { SubscriptionsPanel } from '@/components/SubscriptionsPanel';
+import { CustomerSummary, type SummaryContext } from '@/components/CustomerSummary';
 import { ToastProvider } from '@/components/Toast';
+import type { CustomerSummary as CustomerSummaryType, ResolvedContext } from '@/lib/types';
 
 export function App() {
   return (
@@ -32,6 +34,7 @@ function Dashboard() {
 
   const shopifyCustomerId = context?.shopifyCustomerId ?? null;
   const email = context?.email ?? null;
+  const contactId = context?.contactId ?? null;
 
   useEffect(() => {
     if (!tokenOk || !context) return;
@@ -46,7 +49,12 @@ function Dashboard() {
     setError(null);
     setProfile(null);
 
-    fetchCustomerProfile({ shopifyCustomerId, email, signal: controller.signal })
+    fetchCustomerProfile({
+      shopifyCustomerId,
+      email,
+      contactId,
+      signal: controller.signal,
+    })
       .then((data) => setProfile(data))
       .catch((err) => {
         if (err?.name === 'AbortError') return;
@@ -57,9 +65,13 @@ function Dashboard() {
       });
 
     return () => controller.abort();
-  }, [tokenOk, context, shopifyCustomerId, email, reloadKey]);
+  }, [tokenOk, context, shopifyCustomerId, email, contactId, reloadKey]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  const handleSummaryRefreshed = useCallback((summary: CustomerSummaryType) => {
+    setProfile((p) => (p ? { ...p, aiSummary: summary } : p));
+  }, []);
 
   if (!tokenOk) {
     return (
@@ -83,7 +95,12 @@ function Dashboard() {
       ) : error ? (
         <ErrorState message={error} onRetry={reload} />
       ) : profile && profile.found ? (
-        <Loaded profile={profile} onChanged={reload} />
+        <Loaded
+          profile={profile}
+          context={context}
+          onChanged={reload}
+          onSummaryRefreshed={handleSummaryRefreshed}
+        />
       ) : (
         <EmptyState
           title="No Shopify match"
@@ -96,17 +113,35 @@ function Dashboard() {
 
 function Loaded({
   profile,
+  context,
   onChanged,
+  onSummaryRefreshed,
 }: {
   profile: CustomerProfile;
+  context: ResolvedContext;
   onChanged: () => void;
+  onSummaryRefreshed: (summary: CustomerSummaryType) => void;
 }) {
   const activeSubs = profile.summary.activeSubscriptionCount;
+
+  const summaryContext: SummaryContext = {
+    contactId: context.contactId,
+    conversationId: context.conversationId,
+    email: context.email,
+    shopifyCustomerId: context.shopifyCustomerId,
+    customerName: context.contactName,
+  };
 
   return (
     <>
       <ProfileHeader profile={profile} />
       <SummaryRow profile={profile} />
+
+      <CustomerSummary
+        summary={profile.aiSummary ?? null}
+        context={summaryContext}
+        onRefreshed={onSummaryRefreshed}
+      />
 
       <Tabs defaultValue="orders" className="gap-3">
         <TabsList className="w-full">

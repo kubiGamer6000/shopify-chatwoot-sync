@@ -62,3 +62,6 @@ services:
       - key: DASHBOARD_APP_TOKEN
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      - key: FIREBASE_BASE64_SERVICE_ACCOUNT
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET

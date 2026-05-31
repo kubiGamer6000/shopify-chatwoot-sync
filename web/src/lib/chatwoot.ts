@@ -36,8 +36,9 @@ function resolveContext(ctx: ChatwootAppContext): ResolvedContext {
   const email = contact?.email || sender?.email || null;
   const contactName = contact?.name || sender?.name || null;
   const conversationId = ctx.conversation?.id ?? null;
+  const contactId = contact?.id ?? sender?.id ?? null;
 
-  return { conversationId, shopifyCustomerId, email, contactName };
+  return { conversationId, contactId, shopifyCustomerId, email, contactName };
 }
 
 export function requestContext(): void {

@@ -2,6 +2,7 @@ import * as React from 'react';
 import {
   ChevronDown,
   ExternalLink,
+  MapPin,
   Sparkles,
   Truck,
 } from 'lucide-react';
@@ -12,6 +13,7 @@ import {
   financialLabel,
   financialVariant,
   formatDate,
+  formatDateTime,
   formatMoney,
 } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
@@ -114,13 +116,22 @@ function TrackingSection({ tracking }: { tracking: OrderTrackingDTO[] }) {
   );
 }
 
+const DEFAULT_EVENT_COUNT = 5;
+
 function TrackingRow({ tracking }: { tracking: OrderTrackingDTO }) {
   const live = tracking.live;
+  const [showAll, setShowAll] = React.useState(false);
+
+  const events = live?.events ?? [];
+  const visibleEvents = showAll
+    ? events
+    : events.slice(0, DEFAULT_EVENT_COUNT);
+
   return (
     <div className="bg-muted/40 rounded-md border px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-medium">
-          {tracking.company || 'Carrier'}
+          {tracking.company || live?.carrier || 'Carrier'}
         </span>
         {tracking.url ? (
           <a
@@ -148,32 +159,42 @@ function TrackingRow({ tracking }: { tracking: OrderTrackingDTO }) {
               </span>
             </div>
           )}
-          {live.lastEvent && (
-            <div className="text-muted-foreground">
-              {live.lastEvent}
-              {live.lastLocation ? ` — ${live.lastLocation}` : ''}
-            </div>
-          )}
-          {live.estimatedDelivery?.from && (
-            <div className="text-muted-foreground">
-              Est. delivery: {formatDate(live.estimatedDelivery.from)}
-              {live.estimatedDelivery.to
-                ? ` – ${formatDate(live.estimatedDelivery.to)}`
-                : ''}
-            </div>
-          )}
-          {live.events.length > 0 && (
-            <ol className="border-border mt-1 flex flex-col gap-1 border-l pl-3">
-              {live.events.slice(0, 6).map((e, i) => (
-                <li key={i} className="text-muted-foreground">
-                  <span className="text-foreground/70">
-                    {e.time_iso ? formatDate(e.time_iso) : ''}
-                  </span>{' '}
-                  {e.description}
-                  {e.location ? ` (${e.location})` : ''}
-                </li>
-              ))}
-            </ol>
+
+          <TransitMetrics live={live} />
+
+          {events.length > 0 && (
+            <>
+              <ol className="border-border mt-1.5 flex flex-col gap-2 border-l pl-3">
+                {visibleEvents.map((e, i) => (
+                  <li key={i} className="relative">
+                    <span className="bg-border absolute top-1 -left-[15px] size-1.5 rounded-full" />
+                    <div className="text-foreground/80 font-medium">
+                      {e.time_iso || e.time_utc
+                        ? formatDateTime(e.time_utc || e.time_iso)
+                        : ''}
+                    </div>
+                    <div className="text-muted-foreground">{e.description}</div>
+                    {(e.location || e.provider) && (
+                      <div className="text-muted-foreground/80 flex items-center gap-1">
+                        <MapPin className="size-3 shrink-0" />
+                        {[e.location, e.provider].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+              {events.length > DEFAULT_EVENT_COUNT && (
+                <button
+                  type="button"
+                  onClick={() => setShowAll((v) => !v)}
+                  className="text-info mt-1 self-start hover:underline"
+                >
+                  {showAll
+                    ? 'Show less'
+                    : `Show all ${events.length} updates`}
+                </button>
+              )}
+            </>
           )}
         </div>
       ) : (
@@ -184,5 +205,35 @@ function TrackingRow({ tracking }: { tracking: OrderTrackingDTO }) {
         </div>
       )}
     </div>
+  );
+}
+
+function TransitMetrics({
+  live,
+}: {
+  live: NonNullable<OrderTrackingDTO['live']>;
+}) {
+  const bits: string[] = [];
+  if (live.daysInTransit != null) {
+    bits.push(`${live.daysInTransit}d in transit`);
+  }
+  if (live.originCountry && live.destinationCountry) {
+    bits.push(`${live.originCountry} → ${live.destinationCountry}`);
+  }
+
+  return (
+    <>
+      {live.estimatedDelivery?.from && (
+        <div className="text-muted-foreground">
+          Est. delivery: {formatDate(live.estimatedDelivery.from)}
+          {live.estimatedDelivery.to
+            ? ` – ${formatDate(live.estimatedDelivery.to)}`
+            : ''}
+        </div>
+      )}
+      {bits.length > 0 && (
+        <div className="text-muted-foreground/80">{bits.join(' · ')}</div>
+      )}
+    </>
   );
 }
