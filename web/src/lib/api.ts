@@ -1,13 +1,13 @@
 import type { CustomerProfile } from './types';
-
-const APP_TOKEN = import.meta.env.VITE_DASHBOARD_APP_TOKEN as string | undefined;
+import { getAppToken } from './auth';
 
 // Same-origin: the SPA is served from the same Express server under /app.
 const API_BASE = '/app/api';
 
 function headers(): HeadersInit {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (APP_TOKEN) h['x-app-token'] = APP_TOKEN;
+  const token = getAppToken();
+  if (token) h['x-app-token'] = token;
   return h;
 }
 

@@ -3,7 +3,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { verifyShopifyWebhook } from './middleware/verifyShopifyWebhook.js';
 import { syncAuth } from './middleware/syncAuth.js';
-import { appAuth } from './middleware/appAuth.js';
+import { appAuth, appPageAuth } from './middleware/appAuth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import webhookRoutes from './routes/webhooks.js';
 import syncRoutes from './routes/sync.js';
@@ -53,12 +53,15 @@ function dashboardAppCsp(_req: Request, res: Response, next: NextFunction): void
 // __dirname resolves to dist/ in production and src/ under tsx — both sit one
 // level below the repo root where web/dist lives.
 const webDist = path.resolve(__dirname, '..', 'web', 'dist');
-// Serve index.html for the app root (avoids the 301 redirect express.static
-// would otherwise issue for /app), then static assets for everything else.
-app.get('/app', dashboardAppCsp, (_req, res) => {
+
+function serveAppIndex(_req: Request, res: Response): void {
   res.sendFile(path.join(webDist, 'index.html'));
-});
-app.use('/app', dashboardAppCsp, express.static(webDist));
+}
+
+// HTML entry points require ?token=… (see appPageAuth). Assets under /app/assets/
+// are public but contain no secrets; API calls still need the token header.
+app.get(['/app', '/app/'], dashboardAppCsp, appPageAuth, serveAppIndex);
+app.use('/app', dashboardAppCsp, express.static(webDist, { index: false }));
 
 // Global error handler
 app.use(errorHandler);

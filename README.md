@@ -244,9 +244,19 @@ The backend aggregator is [`src/services/customerProfile.ts`](src/services/custo
 
 ### Auth
 
-The agent-facing API (`/app/api/*`) is gated by a shared token via the `x-app-token` header. Set `DASHBOARD_APP_TOKEN` (backend) and the matching **build-time** `VITE_DASHBOARD_APP_TOKEN` (baked into the SPA bundle). Because the SPA runs in the agent's browser this token is not a strong secret — it gates casual access to an internal tool. If `DASHBOARD_APP_TOKEN` is unset, the API is left open (with a warning).
+Access is gated by a shared secret in **`DASHBOARD_APP_TOKEN`** (server env on DigitalOcean). The token is **not** baked into the JavaScript bundle.
 
-The `/app` routes send a `Content-Security-Policy: frame-ancestors` header allowing `app.chatwoot.com` (and `*.chatwoot.com`) to embed the app.
+1. **Page load** — Chatwoot must load the iframe with the token in the URL:
+   ```
+   https://<your-domain>/app?token=<DASHBOARD_APP_TOKEN>
+   ```
+   Without a valid `?token=`, the server returns **401** and does not serve the SPA.
+
+2. **API calls** — The SPA reads `?token=` from the iframe URL and sends it on every request as the `x-app-token` header. `/app/api/*` rejects requests without a matching token.
+
+This is stronger than embedding the secret in JS (anyone who opened `/app` could extract it from the bundle before). The token still appears in the Chatwoot dashboard config and browser history, so treat it as an internal-tool gate, not per-agent identity. If `DASHBOARD_APP_TOKEN` is unset, both the page and API are left open (with a warning in logs).
+
+The `/app` routes also send `Content-Security-Policy: frame-ancestors` so only Chatwoot can embed the app in an iframe.
 
 ### Local development
 
@@ -263,7 +273,11 @@ For production it is built to `web/dist` and served by Express — the root `npm
 ### Register it in Chatwoot
 
 1. Go to **Settings → Integrations → Dashboard Apps → Configure → Add a new dashboard app**.
-2. Name it (e.g. "Customer 360") and set the URL to `https://<your-domain>/app`.
+2. Name it (e.g. "Customer 360") and set the URL to:
+   ```
+   https://<your-domain>/app?token=<DASHBOARD_APP_TOKEN>
+   ```
+   Use the same value as the `DASHBOARD_APP_TOKEN` env var on your server.
 3. Save. A new tab appears in the conversation view; open it to see the panel.
 
 ---
@@ -354,8 +368,7 @@ web/                         # Chatwoot Dashboard App (Vite + React + Tailwind +
 | `CLAUDE_SYSTEM_PROMPT` | No | Inline override for the system prompt. If unset, falls back to `src/config/systemPrompt.txt` |
 | `CLAUDE_MODEL` | No | Anthropic model id (default: `claude-sonnet-4-20250514`) |
 | `CHATWOOT_WEBHOOK_SECRET` | No | If set, the Chatwoot webhook URL must include `?secret=<value>` |
-| `DASHBOARD_APP_TOKEN` | No | Shared token the Dashboard App sends (`x-app-token`) to call `/app/api/*`. If unset, the API is unprotected |
-| `VITE_DASHBOARD_APP_TOKEN` | No | Build-time copy of the token, baked into the SPA bundle. Must match `DASHBOARD_APP_TOKEN` |
+| `DASHBOARD_APP_TOKEN` | No | Gates `/app` and `/app/api/*`. Pass as `?token=` in the Chatwoot Dashboard App URL. If unset, both are unprotected |
 | `DEBUG` | No | If truthy, posts the full Claude prompt as an additional private note (do not use in prod) |
 
 ---
@@ -435,8 +448,8 @@ You can verify it's working by sending a test customer message into the inbox �
 
 ### 7. Dashboard App
 
-1. (Optional but recommended) generate a random secret and set both `DASHBOARD_APP_TOKEN` and `VITE_DASHBOARD_APP_TOKEN` to the same value.
-2. Deploy, then register the app in Chatwoot under **Settings → Integrations → Dashboard Apps** with URL `https://<your-domain>/app`. Full details in [Dashboard App (Customer 360)](#dashboard-app-customer-360).
+1. Generate a random secret → set as `DASHBOARD_APP_TOKEN` on DigitalOcean (runtime only; no build-time copy needed).
+2. Deploy, then register the app in Chatwoot with URL `https://<your-domain>/app?token=<DASHBOARD_APP_TOKEN>`. Full details in [Dashboard App (Customer 360)](#dashboard-app-customer-360).
 
 ---
 

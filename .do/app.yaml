@@ -62,6 +62,3 @@ services:
       - key: DASHBOARD_APP_TOKEN
         scope: RUN_AND_BUILD_TIME
         type: SECRET
-      - key: VITE_DASHBOARD_APP_TOKEN
-        scope: RUN_AND_BUILD_TIME
-        type: SECRET

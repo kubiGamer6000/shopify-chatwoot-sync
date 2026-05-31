@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Inbox, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Inbox, KeyRound, Loader2, RefreshCw } from 'lucide-react';
 import { useChatwootContext } from '@/lib/chatwoot';
+import { hasAppToken } from '@/lib/auth';
 import { fetchCustomerProfile } from '@/lib/api';
 import type { CustomerProfile } from '@/lib/types';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -22,6 +23,7 @@ export function App() {
 }
 
 function Dashboard() {
+  const tokenOk = hasAppToken();
   const { context } = useChatwootContext();
   const [profile, setProfile] = useState<CustomerProfile | null>(null);
   const [loading, setLoading] = useState(false);
@@ -32,7 +34,7 @@ function Dashboard() {
   const email = context?.email ?? null;
 
   useEffect(() => {
-    if (!context) return;
+    if (!tokenOk || !context) return;
     if (!shopifyCustomerId && !email) {
       setProfile(null);
       setError(null);
@@ -42,7 +44,6 @@ function Dashboard() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    // Clear stale data so we never show one customer's info under another.
     setProfile(null);
 
     fetchCustomerProfile({ shopifyCustomerId, email, signal: controller.signal })
@@ -56,9 +57,17 @@ function Dashboard() {
       });
 
     return () => controller.abort();
-  }, [context, shopifyCustomerId, email, reloadKey]);
+  }, [tokenOk, context, shopifyCustomerId, email, reloadKey]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  if (!tokenOk) {
+    return (
+      <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
+        <MissingTokenState />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
@@ -187,6 +196,23 @@ function EmptyState({ title, message }: { title: string; message: string }) {
         <Inbox className="text-muted-foreground size-6" />
         <p className="font-medium">{title}</p>
         <p className="text-muted-foreground max-w-xs text-sm">{message}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MissingTokenState() {
+  return (
+    <Card>
+      <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+        <KeyRound className="text-muted-foreground size-6" />
+        <p className="font-medium">Missing access token</p>
+        <p className="text-muted-foreground max-w-sm text-sm">
+          Set the Chatwoot Dashboard App URL to{' '}
+          <code className="bg-muted rounded px-1 py-0.5 text-xs">
+            https://&lt;domain&gt;/app?token=&lt;DASHBOARD_APP_TOKEN&gt;
+          </code>
+        </p>
       </CardContent>
     </Card>
   );
