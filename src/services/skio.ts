@@ -90,12 +90,17 @@ const CANCEL_SUBSCRIPTION = `
 `;
 
 export async function cancelSubscription(subscriptionId: string): Promise<boolean> {
+  // `permanentlyCancel: true` is rejected by Skio's public API
+  // ("Permanent cancellation is not available for public API"), so we issue a
+  // standard cancellation. Skio's `cancelSubscription` mutation does not accept
+  // a free-text cancellation reason — reasons are only captured through the
+  // customer-facing Cancel Flow — so there is nothing to set here.
   const data = await skioQuery<{ cancelSubscription: { ok: boolean } }>(
     CANCEL_SUBSCRIPTION,
     {
       input: {
         subscriptionId,
-        permanentlyCancel: true,
+        permanentlyCancel: false,
         shouldSendNotif: false,
       },
     },
