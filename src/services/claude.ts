@@ -17,6 +17,53 @@ export interface StructuredDraft {
 }
 
 /**
+ * Generic single-shot structured completion: returns Claude's reply parsed and
+ * validated against a Zod schema (via native JSON structured outputs), or null
+ * on refusal / parse failure.
+ */
+export async function generateStructured<T>(
+  systemPrompt: string,
+  userPrompt: string,
+  schema: z.ZodType<T>,
+  opts: { maxTokens?: number; model?: string } = {},
+): Promise<T | null> {
+  try {
+    const response = await client.messages.parse({
+      model: opts.model ?? env.claudeModel,
+      max_tokens: opts.maxTokens ?? 1500,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+      output_config: { format: zodOutputFormat(schema) },
+    });
+
+    if (response.stop_reason === 'refusal') {
+      logger.warn('Claude refused the structured completion request');
+      return null;
+    }
+
+    const parsed = response.parsed_output;
+    if (parsed == null) {
+      logger.warn('Claude structured completion returned no parsed output', {
+        stopReason: response.stop_reason,
+      });
+      return null;
+    }
+
+    logger.info('Claude structured completion generated', {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    });
+
+    return parsed;
+  } catch (err) {
+    logger.error('Claude structured completion API error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Generates a customer-support draft using Claude's native JSON structured
  * outputs, splitting the customer-facing reply from the optional agent-only
  * note. Accepts a full messages array so the same call powers both the initial

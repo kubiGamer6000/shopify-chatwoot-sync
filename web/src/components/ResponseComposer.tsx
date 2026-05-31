@@ -27,6 +27,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
   const [noteToAgent, setNoteToAgent] = React.useState<string | null>(null);
   const [lastMsg, setLastMsg] = React.useState<LastCustomerMessage | null>(null);
   const [showLastMsg, setShowLastMsg] = React.useState(false);
+  const [showNote, setShowNote] = React.useState(false);
   const [instruction, setInstruction] = React.useState('');
   const [generating, setGenerating] = React.useState(false);
   const [sending, setSending] = React.useState(false);
@@ -42,6 +43,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
     setNoteToAgent(null);
     setLastMsg(null);
     setShowLastMsg(false);
+    setShowNote(false);
     setInstruction('');
     getDraft(conversationId)
       .then((res) => {
@@ -115,7 +117,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
   };
 
   return (
-    <Card className="border-info/30 gap-0 overflow-hidden py-0 shadow-sm">
+    <Card className="border-info/30 bg-info/5 gap-0 overflow-hidden py-0 shadow-sm">
       {/* Unique accent strip distinguishes the composer from data cards */}
       <div className="from-info via-info to-success h-1 w-full bg-gradient-to-r" />
 
@@ -162,8 +164,38 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
                   />
                 </button>
                 {showLastMsg && (
-                  <p className="text-muted-foreground border-border/60 max-h-40 overflow-y-auto border-t px-2.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap">
+                  <p className="text-muted-foreground border-border/60 bg-card/60 max-h-40 overflow-y-auto border-t px-2.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap">
                     {lastMsg.content}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Note to agent — collapsed by default, never sent to the customer */}
+            {noteToAgent && (
+              <div className="border-warning/40 bg-warning/10 overflow-hidden rounded-lg border">
+                <button
+                  type="button"
+                  onClick={() => setShowNote((v) => !v)}
+                  className="hover:bg-warning/15 flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors"
+                >
+                  <StickyNote className="text-warning-foreground/90 size-3.5 shrink-0" />
+                  <span className="text-warning-foreground/90 text-xs font-semibold uppercase tracking-wide">
+                    Note to agent
+                  </span>
+                  <span className="text-warning-foreground/60 text-[11px] font-medium normal-case">
+                    not sent
+                  </span>
+                  <ChevronDown
+                    className={cn(
+                      'text-warning-foreground/70 ml-auto size-3.5 shrink-0 transition-transform',
+                      showNote && 'rotate-180',
+                    )}
+                  />
+                </button>
+                {showNote && (
+                  <p className="text-foreground/80 border-warning/30 px-2.5 py-2 text-sm leading-relaxed whitespace-pre-wrap border-t">
+                    {noteToAgent}
                   </p>
                 )}
               </div>
@@ -177,18 +209,6 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
               className="resize-y bg-card leading-relaxed"
               disabled={generating || sending}
             />
-
-            {noteToAgent && (
-              <div className="border-warning/40 bg-warning/10 flex flex-col gap-1 rounded-lg border p-2.5">
-                <span className="text-warning-foreground/90 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide">
-                  <StickyNote className="size-3.5" />
-                  Note to agent · not sent
-                </span>
-                <p className="text-foreground/80 text-sm leading-relaxed whitespace-pre-wrap">
-                  {noteToAgent}
-                </p>
-              </div>
-            )}
 
             <div className="flex items-center gap-2">
               <input

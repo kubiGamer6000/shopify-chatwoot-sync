@@ -1,13 +1,79 @@
 import * as React from 'react';
 import { ChevronDown, RefreshCw, Sparkles } from 'lucide-react';
-import type { CustomerSummary as CustomerSummaryType } from '@/lib/types';
+import type {
+  ConversationHistoryItem,
+  CustomerSummary as CustomerSummaryType,
+} from '@/lib/types';
 import { refreshSummary } from '@/lib/api';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/components/Toast';
+
+function statusVariant(status: string | null): 'success' | 'warning' | 'secondary' {
+  const s = (status ?? '').toLowerCase();
+  if (s === 'resolved') return 'success';
+  if (s === 'open' || s === 'pending' || s === 'snoozed') return 'warning';
+  return 'secondary';
+}
+
+function HistoryView({
+  history,
+}: {
+  history: ConversationHistoryItem[] | string;
+}) {
+  // Backward compatibility: older summaries stored history as a single string.
+  if (typeof history === 'string') {
+    return (
+      <p className="text-muted-foreground text-sm leading-relaxed whitespace-pre-wrap">
+        {history}
+      </p>
+    );
+  }
+
+  if (history.length === 0) {
+    return (
+      <p className="text-muted-foreground text-sm">
+        No prior support history.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {history.map((item, i) => (
+        <div
+          key={i}
+          className="border-border/60 bg-card/70 flex flex-col gap-1 rounded-lg border p-2.5"
+        >
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-sm font-semibold">
+              {item.conversationId
+                ? `Conversation #${item.conversationId}`
+                : 'Conversation'}
+            </span>
+            {item.date && (
+              <span className="text-muted-foreground text-xs">
+                {formatDate(item.date)}
+              </span>
+            )}
+            {item.status && (
+              <Badge variant={statusVariant(item.status)} className="ml-auto">
+                {item.status}
+              </Badge>
+            )}
+          </div>
+          <p className="text-muted-foreground text-sm leading-relaxed whitespace-pre-wrap">
+            {item.summary}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export interface SummaryContext {
   contactId: number | null;
@@ -98,13 +164,11 @@ export function CustomerSummary({
             {expanded && (
               <>
                 <Separator className="my-1" />
-                <div className="flex flex-col gap-1">
+                <div className="flex flex-col gap-2">
                   <span className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
                     Conversation history
                   </span>
-                  <p className="text-muted-foreground text-sm leading-relaxed whitespace-pre-wrap">
-                    {summary.history}
-                  </p>
+                  <HistoryView history={summary.history} />
                 </div>
               </>
             )}

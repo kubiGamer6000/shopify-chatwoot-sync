@@ -152,13 +152,21 @@ export interface ResolvedContext {
   contactName: string | null;
 }
 
+export interface ConversationHistoryItem {
+  conversationId: number | null;
+  date: string | null;
+  status: string | null;
+  summary: string;
+}
+
 export interface CustomerSummary {
   contactId: number;
   email: string | null;
   shopifyCustomerId: string | null;
   conversationId: number | null;
   overview: string;
-  history: string;
+  // Newer summaries store an array; older ones may still be a plain string.
+  history: ConversationHistoryItem[] | string;
   model: string;
   generatedAt: string;
 }

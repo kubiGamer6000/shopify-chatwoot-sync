@@ -49,67 +49,22 @@ export function SubscriptionsPanel({
     );
   }
 
-  const active = subscriptions.filter((s) => s.isActive);
-  const inactive = subscriptions.filter((s) => !s.isActive);
-
-  return (
-    <div className="flex flex-col gap-4">
-      {active.length > 0 && (
-        <Section
-          label="Active"
-          count={active.length}
-          dotClass="bg-success"
-        >
-          {active.map((sub) => (
-            <SubscriptionCard
-              key={sub.id}
-              sub={sub}
-              currency={currency}
-              onChanged={onChanged}
-            />
-          ))}
-        </Section>
-      )}
-
-      {inactive.length > 0 && (
-        <Section
-          label="Cancelled / inactive"
-          count={inactive.length}
-          dotClass="bg-muted-foreground/50"
-        >
-          {inactive.map((sub) => (
-            <SubscriptionCard
-              key={sub.id}
-              sub={sub}
-              currency={currency}
-              onChanged={onChanged}
-            />
-          ))}
-        </Section>
-      )}
-    </div>
+  // Active subscriptions first, then cancelled/inactive — no section headers
+  // since customers typically have only one or two subscriptions.
+  const ordered = [...subscriptions].sort(
+    (a, b) => Number(b.isActive) - Number(a.isActive),
   );
-}
 
-function Section({
-  label,
-  count,
-  dotClass,
-  children,
-}: {
-  label: string;
-  count: number;
-  dotClass: string;
-  children: React.ReactNode;
-}) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="text-muted-foreground flex items-center gap-1.5 px-0.5 text-xs font-medium uppercase tracking-wide">
-        <span className={cn('size-1.5 rounded-full', dotClass)} />
-        {label}
-        <span className="text-muted-foreground/70">· {count}</span>
-      </div>
-      {children}
+    <div className="flex flex-col gap-3">
+      {ordered.map((sub) => (
+        <SubscriptionCard
+          key={sub.id}
+          sub={sub}
+          currency={currency}
+          onChanged={onChanged}
+        />
+      ))}
     </div>
   );
 }
@@ -145,12 +100,7 @@ function SubscriptionCard({
   };
 
   return (
-    <Card
-      className={cn(
-        'gap-0 overflow-hidden border-l-4 py-0',
-        sub.isActive ? 'border-l-success' : 'border-l-border bg-muted/20',
-      )}
-    >
+    <Card className={cn('gap-0 py-0', !sub.isActive && 'bg-muted/20')}>
       <CardContent className="flex flex-col gap-3 px-3.5 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5">

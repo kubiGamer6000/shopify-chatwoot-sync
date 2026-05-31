@@ -1,6 +1,7 @@
+import * as z from 'zod/v4';
 import { logger } from '../utils/logger.js';
 import { getDb } from './firestore.js';
-import { generateCompletion } from './claude.js';
+import { generateStructured } from './claude.js';
 import {
   getContactConversations,
   getConversationMessages,
@@ -10,6 +11,18 @@ import { countSubscriptionOrders } from '../utils/formatters.js';
 import type { ChatwootMessage } from '../types/chatwoot.js';
 import type { ShopifyOrder } from '../types/index.js';
 import type { CustomerSummary } from '../types/summary.js';
+
+const SummarySchema = z.object({
+  overview: z.string(),
+  history: z.array(
+    z.object({
+      conversationId: z.number().nullable(),
+      date: z.string().nullable(),
+      status: z.string().nullable(),
+      summary: z.string(),
+    }),
+  ),
+});
 
 const COLLECTION = 'customerSummaries';
 const MAX_CONVERSATIONS = 15;
@@ -133,12 +146,16 @@ async function resolveOrders(
 
 const SUMMARY_SYSTEM_PROMPT = `You are an assistant that writes concise internal summaries of a customer for support agents at Scandi, an e-commerce gum brand. You receive the customer's profile, order history, and their full support conversation history.
 
-Produce a JSON object with exactly two string fields:
+Produce an object with two fields:
 - "overview": 2-4 sentences. Who the customer is, total orders and lifetime value, subscription status, and the status of recent/relevant orders (e.g. shipped, delivered, delayed, cancelled). Call out anything notable (high-value, repeat issues, at-risk of churn).
-- "history": A concise but detailed recap of ALL their support conversations. For each notable thread cover: the problem or request, what the agent actually did, anything the agent promised, and the resolution/current status. Order chronologically (oldest first). Be specific — reference order numbers, dates, amounts, and discount codes when present. If there is no support history, say so briefly.
+- "history": an array with ONE entry per support conversation, ordered chronologically (oldest first). Each entry has:
+  - "conversationId": the conversation's numeric id (from the "Conversation #<id>" header), or null if unknown.
+  - "date": the conversation's start date as YYYY-MM-DD, or null.
+  - "status": the conversation status (e.g. "resolved", "open"), or null.
+  - "summary": a concise but detailed recap of THAT conversation only — the problem or request, what the agent actually did, anything the agent promised, and the resolution/current status. Be specific: reference order numbers, amounts, and discount codes when present. Do NOT repeat the conversation id/date/status inside this text (they are separate fields).
+  If there is no support history, return an empty array.
 
 Rules:
-- Output ONLY valid minified JSON in the form {"overview":"...","history":"..."}. No markdown, no code fences, no commentary.
 - Be factual. Never invent details that are not in the provided context.
 - Only summarize real customer messages and real sent agent replies. Ignore internal private notes / AI draft suggestions entirely.
 - Write in English even if the conversation is in another language.`;
@@ -228,35 +245,6 @@ function buildConversationsSection(
   return `--- CONVERSATIONS ---\n${blocks.join('\n---\n')}`;
 }
 
-// --- Parsing ---
-
-function parseSummary(
-  raw: string,
-): { overview: string; history: string } | null {
-  const tryParse = (s: string) => {
-    try {
-      const obj = JSON.parse(s) as { overview?: unknown; history?: unknown };
-      if (typeof obj.overview === 'string' && typeof obj.history === 'string') {
-        return { overview: obj.overview, history: obj.history };
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  };
-
-  const direct = tryParse(raw.trim());
-  if (direct) return direct;
-
-  // Tolerate code fences or surrounding prose: extract the first {...} block.
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start !== -1 && end > start) {
-    return tryParse(raw.slice(start, end + 1));
-  }
-  return null;
-}
-
 // --- Public API ---
 
 /**
@@ -267,20 +255,14 @@ export async function generateAndStoreSummary(
   input: SummaryInput,
 ): Promise<CustomerSummary | null> {
   const userPrompt = buildSummaryUserPrompt(input);
-  const raw = await generateCompletion(SUMMARY_SYSTEM_PROMPT, userPrompt, {
-    model: SUMMARY_MODEL,
-    maxTokens: 1500,
-  });
-  if (!raw) {
-    logger.warn('Summary generation returned no content', {
-      contactId: input.contactId,
-    });
-    return null;
-  }
-
-  const parsed = parseSummary(raw);
+  const parsed = await generateStructured(
+    SUMMARY_SYSTEM_PROMPT,
+    userPrompt,
+    SummarySchema,
+    { model: SUMMARY_MODEL, maxTokens: 1500 },
+  );
   if (!parsed) {
-    logger.warn('Failed to parse summary JSON from Claude', {
+    logger.warn('Summary generation returned no content', {
       contactId: input.contactId,
     });
     return null;
