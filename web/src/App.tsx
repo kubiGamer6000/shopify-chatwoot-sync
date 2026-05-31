@@ -13,6 +13,7 @@ import { SummaryRow } from '@/components/SummaryRow';
 import { OrdersList } from '@/components/OrdersList';
 import { SubscriptionsPanel } from '@/components/SubscriptionsPanel';
 import { CustomerSummary, type SummaryContext } from '@/components/CustomerSummary';
+import { ResponseComposer } from '@/components/ResponseComposer';
 import { ToastProvider } from '@/components/Toast';
 import type { CustomerSummary as CustomerSummaryType, ResolvedContext } from '@/lib/types';
 
@@ -142,6 +143,8 @@ function Loaded({
         context={summaryContext}
         onRefreshed={onSummaryRefreshed}
       />
+
+      {context.conversationId && <ResponseComposer context={context} />}
 
       <Tabs defaultValue="orders" className="gap-3">
         <TabsList className="w-full">

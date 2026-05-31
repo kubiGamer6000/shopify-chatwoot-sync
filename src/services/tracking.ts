@@ -17,11 +17,36 @@ const trackingClient = axios.create({
   },
 });
 
+// 17track error code returned when the account has no registration quota left.
+const QUOTA_EXHAUSTED_CODE = -18019908;
+
+export interface QuotaInfo {
+  quota_total: number;
+  quota_used: number;
+  quota_remain: number;
+}
+
 export async function registerTrackings(
   items: RegisterTrackingItem[],
 ): Promise<TrackInfoResponse> {
   const res = await trackingClient.post<TrackInfoResponse>('/register', items);
   return res.data;
+}
+
+/** Returns the account's registration quota, or null if the call fails. */
+export async function getQuota(): Promise<QuotaInfo | null> {
+  try {
+    const res = await trackingClient.post<{ code: number; data: QuotaInfo }>(
+      '/getquota',
+      {},
+    );
+    return res.data?.data ?? null;
+  } catch (err) {
+    logger.warn('17track getquota failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 export async function getTrackInfo(
@@ -103,18 +128,58 @@ export async function getTrackingStatus(
   const rejected = response.data.rejected;
   if (rejected.length === 0) return result;
 
+  // Numbers already known to 17track but not yet registered get registered now.
+  // A number can be rejected for reasons other than "not registered" (e.g. the
+  // account being out of quota), so only attempt to register genuinely
+  // unregistered numbers.
+  const toRegister = rejected.filter(
+    (r) => r.error?.code !== QUOTA_EXHAUSTED_CODE,
+  );
+
+  if (rejected.some((r) => r.error?.code === QUOTA_EXHAUSTED_CODE)) {
+    const quota = await getQuota();
+    logger.error(
+      '17track registration quota exhausted — tracking data unavailable for new numbers. Top up quota at https://api.17track.net/',
+      {
+        quotaUsed: quota?.quota_used,
+        quotaTotal: quota?.quota_total,
+        quotaRemain: quota?.quota_remain,
+      },
+    );
+  }
+
+  if (toRegister.length === 0) return result;
+
   logger.info('Some tracking numbers not registered, registering now', {
-    count: rejected.length,
+    count: toRegister.length,
   });
 
   try {
-    await registerTrackings(
-      rejected.map((r) => ({ number: r.number })),
+    const registerResponse = await registerTrackings(
+      toRegister.map((r) => ({ number: r.number })),
     );
+
+    const registerRejected = registerResponse.data?.rejected ?? [];
+    const quotaError = registerRejected.find(
+      (r) => r.error?.code === QUOTA_EXHAUSTED_CODE,
+    );
+    if (quotaError) {
+      const quota = await getQuota();
+      logger.error(
+        '17track registration quota exhausted — could not register new tracking numbers. Top up quota at https://api.17track.net/',
+        {
+          quotaUsed: quota?.quota_used,
+          quotaTotal: quota?.quota_total,
+          quotaRemain: quota?.quota_remain,
+        },
+      );
+      return result;
+    }
+
     await sleep(3000);
 
     const retryResponse = await getTrackInfo(
-      rejected.map((r) => ({ number: r.number })),
+      toRegister.map((r) => ({ number: r.number })),
     );
 
     for (const item of retryResponse.data.accepted) {

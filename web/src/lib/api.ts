@@ -1,4 +1,9 @@
-import type { CustomerProfile, CustomerSummary } from './types';
+import type {
+  CustomerProfile,
+  CustomerSummary,
+  AiDraftDTO,
+  GeneratedDraft,
+} from './types';
 import { getAppToken } from './auth';
 
 // Same-origin: the SPA is served from the same Express server under /app.
@@ -58,6 +63,44 @@ export async function refreshSummary(params: {
     body: JSON.stringify(params),
   });
   return handle<{ summary: CustomerSummary | null }>(res);
+}
+
+export async function getDraft(
+  conversationId: number,
+): Promise<{ draft: AiDraftDTO | null }> {
+  const res = await fetch(
+    `${API_BASE}/draft?conversationId=${encodeURIComponent(conversationId)}`,
+    { headers: headers() },
+  );
+  return handle<{ draft: AiDraftDTO | null }>(res);
+}
+
+export async function generateDraft(params: {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+  instruction?: string | null;
+  previousResponse?: string | null;
+  correction?: string | null;
+}): Promise<GeneratedDraft> {
+  const res = await fetch(`${API_BASE}/draft/generate`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(params),
+  });
+  return handle<GeneratedDraft>(res);
+}
+
+export async function sendReply(
+  conversationId: number,
+  message: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_BASE}/draft/send`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ conversationId, message }),
+  });
+  return handle<{ ok: boolean }>(res);
 }
 
 export async function cancelSubscription(

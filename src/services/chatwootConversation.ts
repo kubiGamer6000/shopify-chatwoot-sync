@@ -53,3 +53,27 @@ export async function postPrivateNote(
   });
   return res.data;
 }
+
+/**
+ * Sends a public outgoing reply to the customer in a conversation (visible to
+ * the customer, unlike a private note).
+ */
+export async function sendReply(
+  conversationId: number,
+  content: string,
+): Promise<ChatwootMessage> {
+  const res = await chatwootClient.post<ChatwootMessage>(
+    `/conversations/${conversationId}/messages`,
+    {
+      content,
+      message_type: 'outgoing',
+      private: false,
+      content_type: 'text',
+    },
+  );
+  logger.info('Sent reply to customer', {
+    conversationId,
+    messageId: res.data.id,
+  });
+  return res.data;
+}

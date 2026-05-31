@@ -162,3 +162,19 @@ export interface CustomerSummary {
   model: string;
   generatedAt: string;
 }
+
+export interface AiDraftDTO {
+  conversationId: number;
+  contactId: number | null;
+  response: string;
+  noteToAgent: string | null;
+  model: string;
+  generatedAt: string;
+  source: 'auto' | 'manual';
+}
+
+// Returned by POST /draft/generate (structured draft only).
+export interface GeneratedDraft {
+  response: string;
+  noteToAgent?: string;
+}

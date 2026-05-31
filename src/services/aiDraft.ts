@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -8,24 +9,28 @@ import {
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
-import { generateDraft } from './claude.js';
+import { generateStructuredDraft, type StructuredDraft } from './claude.js';
 import {
   gatherConversationsWithMessages,
   generateAndStoreSummary,
 } from './customerSummary.js';
-import { buildPrompt } from '../utils/promptBuilder.js';
+import { storeDraft } from './draftStore.js';
+import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { TrackingSummary } from '../types/tracking.js';
 
-export async function handleIncomingMessage(
-  payload: ChatwootWebhookPayload,
-): Promise<void> {
-  const conversationId = payload.conversation.id;
-  const contactId = payload.sender.id;
-  const contactEmail = payload.sender.email;
-
-  logger.info('Processing AI draft', { conversationId, contactId, contactEmail });
+/**
+ * Gathers all Chatwoot + Shopify + tracking context for a conversation and
+ * returns a ready-to-use PromptContext. Shared by the incoming-message webhook
+ * flow and the on-demand dashboard composer.
+ */
+export async function gatherDraftContext(params: {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+}): Promise<PromptContext> {
+  const { conversationId, contactId } = params;
 
   // Phase 1: Fetch Chatwoot context in parallel
   const [messagesRes, conversationDetails, contactConversations] = await Promise.all([
@@ -36,7 +41,8 @@ export async function handleIncomingMessage(
 
   const currentMessages = messagesRes.payload;
   const customerName = conversationDetails.meta?.sender?.name;
-  const email = conversationDetails.meta?.sender?.email || contactEmail;
+  const email =
+    conversationDetails.meta?.sender?.email || params.email || undefined;
 
   // Extract email subject: conversation-level first, then fall back to first message
   const mailSubject =
@@ -109,8 +115,7 @@ export async function handleIncomingMessage(
     }
   }
 
-  // Phase 4: Build prompt and call Claude
-  const userPrompt = buildPrompt({
+  return {
     customerName,
     customerEmail: email,
     shopifyCustomer,
@@ -121,7 +126,28 @@ export async function handleIncomingMessage(
     conversationId,
     isNewConversation,
     emailSubject: mailSubject,
-  });
+  };
+}
+
+/**
+ * Formats a structured draft for posting as a Chatwoot private note, preserving
+ * the historical `[NOTE TO AGENT]` layout that agents are used to.
+ */
+export function formatDraftNote(draft: StructuredDraft): string {
+  if (draft.noteToAgent && draft.noteToAgent.trim()) {
+    return `${draft.response}\n\n---\n[NOTE TO AGENT]\n${draft.noteToAgent.trim()}`;
+  }
+  return draft.response;
+}
+
+export async function handleIncomingMessage(
+  payload: ChatwootWebhookPayload,
+): Promise<void> {
+  const conversationId = payload.conversation.id;
+  const contactId = payload.sender.id;
+  const contactEmail = payload.sender.email;
+
+  logger.info('Processing AI draft', { conversationId, contactId, contactEmail });
 
   const systemPrompt = env.claudeSystemPrompt;
   if (!systemPrompt) {
@@ -129,20 +155,39 @@ export async function handleIncomingMessage(
     return;
   }
 
+  const ctx = await gatherDraftContext({
+    conversationId,
+    contactId,
+    email: contactEmail,
+  });
+
+  const userPrompt = buildPrompt(ctx);
+
   if (process.env.DEBUG) {
     const debugNote = `**[DEBUG] Full prompt sent to Claude:**\n\n---\n**System prompt:**\n${systemPrompt}\n\n---\n**User prompt:**\n${userPrompt}\n---`;
     await postPrivateNote(conversationId, debugNote);
     logger.debug('Posted debug prompt to conversation', { conversationId });
   }
 
-  const draft = await generateDraft(systemPrompt, userPrompt);
+  const draft = await generateStructuredDraft(systemPrompt, [
+    { role: 'user', content: userPrompt },
+  ]);
   if (!draft) {
     logger.warn('Claude returned no draft', { conversationId });
     return;
   }
 
-  // Phase 5: Post as private note
-  await postPrivateNote(conversationId, draft);
+  // Phase 5: Post as private note (response + optional note to agent) and store.
+  await postPrivateNote(conversationId, formatDraftNote(draft));
+  await storeDraft({
+    conversationId,
+    contactId,
+    response: draft.response,
+    noteToAgent: draft.noteToAgent ?? null,
+    model: env.claudeModel,
+    generatedAt: new Date().toISOString(),
+    source: 'auto',
+  });
   logger.info('AI draft posted successfully', { conversationId });
 
   // Phase 6: Refresh the stored customer AI summary (best-effort).
@@ -151,12 +196,72 @@ export async function handleIncomingMessage(
   await generateCustomerSummarySafely({
     contactId,
     conversationId,
-    email,
-    shopifyCustomer,
-    shopifyCustomerId,
-    customerName,
-    orders,
+    email: ctx.customerEmail,
+    shopifyCustomer: ctx.shopifyCustomer ?? null,
+    customerName: ctx.customerName,
+    orders: ctx.orders,
   });
+}
+
+/**
+ * Generates a customer reply on demand for the dashboard composer. When a
+ * previous response + correction are supplied, runs a single-shot revision
+ * (the correction is sent as a follow-up turn after the prior reply). Stores
+ * the result as the latest draft and returns it.
+ */
+export async function generateResponse(params: {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+  instruction?: string | null;
+  previousResponse?: string | null;
+  correction?: string | null;
+}): Promise<StructuredDraft | null> {
+  const systemPrompt = env.claudeSystemPrompt;
+  if (!systemPrompt) {
+    logger.warn('CLAUDE_SYSTEM_PROMPT is empty, cannot generate response');
+    return null;
+  }
+
+  const ctx = await gatherDraftContext({
+    conversationId: params.conversationId,
+    contactId: params.contactId,
+    email: params.email,
+  });
+
+  const isRevision = Boolean(
+    params.previousResponse && params.correction && params.correction.trim(),
+  );
+
+  let messages: Anthropic.MessageParam[];
+  if (isRevision) {
+    messages = [
+      { role: 'user', content: buildPrompt(ctx) },
+      { role: 'assistant', content: params.previousResponse! },
+      {
+        role: 'user',
+        content: `Revise the customer reply above based on this instruction from the agent:\n\n${params.correction!.trim()}\n\nReturn the full corrected reply (not just the changes).`,
+      },
+    ];
+  } else {
+    ctx.agentInstruction = params.instruction ?? undefined;
+    messages = [{ role: 'user', content: buildPrompt(ctx) }];
+  }
+
+  const draft = await generateStructuredDraft(systemPrompt, messages);
+  if (!draft) return null;
+
+  await storeDraft({
+    conversationId: params.conversationId,
+    contactId: params.contactId,
+    response: draft.response,
+    noteToAgent: draft.noteToAgent ?? null,
+    model: env.claudeModel,
+    generatedAt: new Date().toISOString(),
+    source: 'manual',
+  });
+
+  return draft;
 }
 
 async function generateCustomerSummarySafely(params: {

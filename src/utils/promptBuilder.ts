@@ -14,6 +14,9 @@ export interface PromptContext {
   conversationId: number;
   isNewConversation: boolean;
   emailSubject?: string;
+  // Free-form instruction from a human agent (dashboard composer). When present,
+  // it takes precedence over the default playbook for how to respond.
+  agentInstruction?: string;
 }
 
 export function buildPrompt(ctx: PromptContext): string {
@@ -26,6 +29,12 @@ export function buildPrompt(ctx: PromptContext): string {
   sections.push(buildTrackingSection(ctx.orders, ctx.trackingByNumber));
   sections.push(buildCurrentConversationSection(ctx.currentMessages, ctx.emailSubject));
   sections.push(buildPreviousConversationsSection(ctx.previousConversations, ctx.conversationId));
+
+  if (ctx.agentInstruction && ctx.agentInstruction.trim()) {
+    sections.push(
+      `--- AGENT INSTRUCTION ---\nThe human agent has given you a specific instruction for how to write this reply. Follow it, overriding the default playbook where they conflict (but never break the ABSOLUTE RULES):\n\n${ctx.agentInstruction.trim()}`,
+    );
+  }
 
   return sections.filter(Boolean).join('\n\n');
 }

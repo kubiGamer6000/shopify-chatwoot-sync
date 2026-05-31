@@ -7,6 +7,9 @@ import {
   getStoredSummary,
   refreshSummaryForContact,
 } from '../services/customerSummary.js';
+import { getLatestDraft } from '../services/draftStore.js';
+import { generateResponse } from '../services/aiDraft.js';
+import { sendReply } from '../services/chatwootConversation.js';
 
 const router = Router();
 
@@ -93,6 +96,99 @@ router.post('/summary/refresh', async (req: Request, res: Response) => {
       error: err instanceof Error ? err.message : String(err),
     });
     res.status(500).json({ error: 'Failed to refresh summary' });
+  }
+});
+
+router.get('/draft', async (req: Request, res: Response) => {
+  const conversationId =
+    typeof req.query.conversationId === 'string'
+      ? Number(req.query.conversationId)
+      : null;
+  if (!conversationId || Number.isNaN(conversationId)) {
+    res.status(400).json({ error: 'conversationId is required' });
+    return;
+  }
+
+  try {
+    const draft = await getLatestDraft(conversationId);
+    res.json({ draft });
+  } catch (err) {
+    logger.error('Failed to read draft', {
+      conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Failed to read draft' });
+  }
+});
+
+router.post('/draft/generate', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as {
+    conversationId?: number | string;
+    contactId?: number | string;
+    email?: string;
+    instruction?: string;
+    previousResponse?: string;
+    correction?: string;
+  };
+  const conversationId = body.conversationId ? Number(body.conversationId) : null;
+  const contactId = body.contactId ? Number(body.contactId) : null;
+  if (!conversationId || Number.isNaN(conversationId)) {
+    res.status(400).json({ error: 'conversationId is required' });
+    return;
+  }
+  if (!contactId || Number.isNaN(contactId)) {
+    res.status(400).json({ error: 'contactId is required' });
+    return;
+  }
+
+  try {
+    const draft = await generateResponse({
+      conversationId,
+      contactId,
+      email: body.email ?? null,
+      instruction: body.instruction ?? null,
+      previousResponse: body.previousResponse ?? null,
+      correction: body.correction ?? null,
+    });
+    if (!draft) {
+      res.status(502).json({ error: 'Failed to generate a response' });
+      return;
+    }
+    res.json(draft);
+  } catch (err) {
+    logger.error('Failed to generate response', {
+      conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Failed to generate response' });
+  }
+});
+
+router.post('/draft/send', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as {
+    conversationId?: number | string;
+    message?: string;
+  };
+  const conversationId = body.conversationId ? Number(body.conversationId) : null;
+  const message = typeof body.message === 'string' ? body.message.trim() : '';
+  if (!conversationId || Number.isNaN(conversationId)) {
+    res.status(400).json({ error: 'conversationId is required' });
+    return;
+  }
+  if (!message) {
+    res.status(400).json({ error: 'message is required' });
+    return;
+  }
+
+  try {
+    await sendReply(conversationId, message);
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error('Failed to send reply', {
+      conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Failed to send reply' });
   }
 });
 
