@@ -9,7 +9,11 @@ import {
 } from '../services/customerSummary.js';
 import { getLatestDraft } from '../services/draftStore.js';
 import { generateResponse } from '../services/aiDraft.js';
-import { sendReply } from '../services/chatwootConversation.js';
+import {
+  sendReply,
+  getLastCustomerMessage,
+  resolveConversation,
+} from '../services/chatwootConversation.js';
 
 const router = Router();
 
@@ -110,8 +114,11 @@ router.get('/draft', async (req: Request, res: Response) => {
   }
 
   try {
-    const draft = await getLatestDraft(conversationId);
-    res.json({ draft });
+    const [draft, lastCustomerMessage] = await Promise.all([
+      getLatestDraft(conversationId),
+      getLastCustomerMessage(conversationId).catch(() => null),
+    ]);
+    res.json({ draft, lastCustomerMessage });
   } catch (err) {
     logger.error('Failed to read draft', {
       conversationId,
@@ -168,9 +175,11 @@ router.post('/draft/send', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as {
     conversationId?: number | string;
     message?: string;
+    resolve?: boolean;
   };
   const conversationId = body.conversationId ? Number(body.conversationId) : null;
   const message = typeof body.message === 'string' ? body.message.trim() : '';
+  const shouldResolve = body.resolve !== false;
   if (!conversationId || Number.isNaN(conversationId)) {
     res.status(400).json({ error: 'conversationId is required' });
     return;
@@ -181,8 +190,24 @@ router.post('/draft/send', async (req: Request, res: Response) => {
   }
 
   try {
+    // Sending the reply is the critical step. Resolving is best-effort so a
+    // resolve failure never loses the agent's message.
     await sendReply(conversationId, message);
-    res.json({ ok: true });
+
+    let resolved = false;
+    if (shouldResolve) {
+      try {
+        await resolveConversation(conversationId);
+        resolved = true;
+      } catch (err) {
+        logger.warn('Reply sent but failed to resolve conversation', {
+          conversationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    res.json({ ok: true, resolved });
   } catch (err) {
     logger.error('Failed to send reply', {
       conversationId,

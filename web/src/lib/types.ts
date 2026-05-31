@@ -178,3 +178,13 @@ export interface GeneratedDraft {
   response: string;
   noteToAgent?: string;
 }
+
+export interface LastCustomerMessage {
+  content: string;
+  createdAt: string;
+}
+
+export interface DraftResponse {
+  draft: AiDraftDTO | null;
+  lastCustomerMessage: LastCustomerMessage | null;
+}

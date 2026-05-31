@@ -1,7 +1,16 @@
 import * as React from 'react';
-import { Loader2, Send, Sparkles, StickyNote } from 'lucide-react';
-import type { ResolvedContext } from '@/lib/types';
+import {
+  ChevronDown,
+  Loader2,
+  MessageSquareQuote,
+  Send,
+  Sparkles,
+  StickyNote,
+  WandSparkles,
+} from 'lucide-react';
+import type { LastCustomerMessage, ResolvedContext } from '@/lib/types';
 import { getDraft, generateDraft, sendReply } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,11 +25,12 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
   const [loading, setLoading] = React.useState(true);
   const [response, setResponse] = React.useState('');
   const [noteToAgent, setNoteToAgent] = React.useState<string | null>(null);
+  const [lastMsg, setLastMsg] = React.useState<LastCustomerMessage | null>(null);
+  const [showLastMsg, setShowLastMsg] = React.useState(false);
   const [instruction, setInstruction] = React.useState('');
   const [generating, setGenerating] = React.useState(false);
   const [sending, setSending] = React.useState(false);
 
-  // Load the latest stored draft for this conversation (prefilled suggestion).
   React.useEffect(() => {
     if (!conversationId) {
       setLoading(false);
@@ -30,6 +40,8 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
     setLoading(true);
     setResponse('');
     setNoteToAgent(null);
+    setLastMsg(null);
+    setShowLastMsg(false);
     setInstruction('');
     getDraft(conversationId)
       .then((res) => {
@@ -38,6 +50,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
           setResponse(res.draft.response);
           setNoteToAgent(res.draft.noteToAgent);
         }
+        setLastMsg(res.lastCustomerMessage);
       })
       .catch(() => {
         /* no stored draft / firestore disabled — start blank */
@@ -50,8 +63,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
     };
   }, [conversationId]);
 
-  const canGenerate =
-    !!conversationId && !!contactId && !generating && !sending;
+  const canGenerate = !!conversationId && !!contactId && !generating && !sending;
   const hasResponse = response.trim().length > 0;
 
   const handleGenerate = async () => {
@@ -81,8 +93,13 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
     if (!conversationId || !response.trim()) return;
     setSending(true);
     try {
-      await sendReply(conversationId, response.trim());
-      notify('success', 'Message sent to customer.');
+      const res = await sendReply(conversationId, response.trim(), true);
+      notify(
+        'success',
+        res.resolved
+          ? 'Message sent & conversation resolved.'
+          : 'Message sent (could not resolve conversation).',
+      );
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to send');
     } finally {
@@ -98,32 +115,72 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
   };
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 py-3">
-        <div className="flex items-center gap-1.5 text-sm font-semibold">
-          <Sparkles className="text-info size-4" />
-          Response
+    <Card className="border-info/30 gap-0 overflow-hidden py-0 shadow-sm">
+      {/* Unique accent strip distinguishes the composer from data cards */}
+      <div className="from-info via-info to-success h-1 w-full bg-gradient-to-r" />
+
+      <CardContent className="flex flex-col gap-3 px-4 py-4">
+        <div className="flex items-center gap-2.5">
+          <div className="from-info to-info/70 text-info-foreground flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br shadow-sm">
+            <WandSparkles className="size-4" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold leading-tight">
+              Compose reply
+            </span>
+            <span className="text-muted-foreground text-xs leading-tight">
+              AI-assisted · sends to the customer
+            </span>
+          </div>
         </div>
 
         {loading ? (
           <div className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
             <Loader2 className="size-4 animate-spin" />
-            Loading suggested response…
+            Loading suggested reply…
           </div>
         ) : (
           <>
+            {/* Collapsed-by-default message being replied to */}
+            {lastMsg && (
+              <div className="border-border/70 bg-muted/30 overflow-hidden rounded-lg border">
+                <button
+                  type="button"
+                  onClick={() => setShowLastMsg((v) => !v)}
+                  className="hover:bg-muted/50 flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors"
+                >
+                  <MessageSquareQuote className="text-muted-foreground size-3.5 shrink-0" />
+                  <span className="text-xs font-medium">Customer's last message</span>
+                  <span className="text-muted-foreground/70 ml-auto text-[11px]">
+                    {formatDateTime(lastMsg.createdAt)}
+                  </span>
+                  <ChevronDown
+                    className={cn(
+                      'text-muted-foreground size-3.5 shrink-0 transition-transform',
+                      showLastMsg && 'rotate-180',
+                    )}
+                  />
+                </button>
+                {showLastMsg && (
+                  <p className="text-muted-foreground border-border/60 max-h-40 overflow-y-auto border-t px-2.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap">
+                    {lastMsg.content}
+                  </p>
+                )}
+              </div>
+            )}
+
             <Textarea
               value={response}
               onChange={(e) => setResponse(e.target.value)}
               placeholder="The latest AI suggestion appears here. Edit it, or give an instruction below to generate one."
               rows={9}
-              className="resize-y leading-relaxed"
+              className="resize-y bg-card leading-relaxed"
               disabled={generating || sending}
             />
 
             {noteToAgent && (
-              <div className="bg-muted/50 border-border flex flex-col gap-1 rounded-md border p-2.5">
-                <span className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide">
+              <div className="border-warning/40 bg-warning/10 flex flex-col gap-1 rounded-lg border p-2.5">
+                <span className="text-warning-foreground/90 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide">
                   <StickyNote className="size-3.5" />
                   Note to agent · not sent
                 </span>
@@ -146,8 +203,8 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
                 }
                 disabled={!canGenerate}
                 className={cn(
-                  'border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50',
-                  'h-9 w-full flex-1 rounded-md border bg-transparent px-3 text-sm shadow-xs outline-none',
+                  'border-input bg-card placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50',
+                  'h-9 w-full flex-1 rounded-md border px-3 text-sm shadow-xs outline-none',
                   'transition-[color,box-shadow] focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50',
                 )}
               />
@@ -170,13 +227,14 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
             <Button
               onClick={handleSend}
               disabled={!hasResponse || sending || generating || !conversationId}
+              className="w-full"
             >
               {sending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
                 <Send className="size-4" />
               )}
-              Send message
+              Send message &amp; resolve
             </Button>
           </>
         )}

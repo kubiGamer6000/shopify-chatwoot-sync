@@ -1,8 +1,8 @@
 import type {
   CustomerProfile,
   CustomerSummary,
-  AiDraftDTO,
   GeneratedDraft,
+  DraftResponse,
 } from './types';
 import { getAppToken } from './auth';
 
@@ -65,14 +65,12 @@ export async function refreshSummary(params: {
   return handle<{ summary: CustomerSummary | null }>(res);
 }
 
-export async function getDraft(
-  conversationId: number,
-): Promise<{ draft: AiDraftDTO | null }> {
+export async function getDraft(conversationId: number): Promise<DraftResponse> {
   const res = await fetch(
     `${API_BASE}/draft?conversationId=${encodeURIComponent(conversationId)}`,
     { headers: headers() },
   );
-  return handle<{ draft: AiDraftDTO | null }>(res);
+  return handle<DraftResponse>(res);
 }
 
 export async function generateDraft(params: {
@@ -94,13 +92,14 @@ export async function generateDraft(params: {
 export async function sendReply(
   conversationId: number,
   message: string,
-): Promise<{ ok: boolean }> {
+  resolve = true,
+): Promise<{ ok: boolean; resolved: boolean }> {
   const res = await fetch(`${API_BASE}/draft/send`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ conversationId, message }),
+    body: JSON.stringify({ conversationId, message, resolve }),
   });
-  return handle<{ ok: boolean }>(res);
+  return handle<{ ok: boolean; resolved: boolean }>(res);
 }
 
 export async function cancelSubscription(

@@ -9,7 +9,7 @@ export function ProfileHeader({ profile }: { profile: CustomerProfile }) {
   return (
     <div className="flex items-start justify-between gap-3">
       <div className="flex items-start gap-3">
-        <div className="bg-primary text-primary-foreground flex size-11 shrink-0 items-center justify-center rounded-full text-base font-semibold">
+        <div className="from-info to-primary text-primary-foreground flex size-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br text-base font-semibold shadow-sm">
           {initials(customer.name)}
         </div>
         <div className="min-w-0">

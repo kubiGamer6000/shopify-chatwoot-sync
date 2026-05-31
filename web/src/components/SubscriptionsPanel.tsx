@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { CalendarClock, Package, RefreshCw, Repeat } from 'lucide-react';
+import { CalendarClock, Package, RefreshCw, Repeat, Sprout } from 'lucide-react';
 import type { SubscriptionDTO } from '@/lib/types';
 import {
   formatDate,
@@ -8,6 +8,7 @@ import {
   titleCase,
 } from '@/lib/format';
 import { cancelSubscription } from '@/lib/api';
+import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -36,9 +37,15 @@ export function SubscriptionsPanel({
 }) {
   if (subscriptions.length === 0) {
     return (
-      <p className="text-muted-foreground py-6 text-center text-sm">
-        No subscriptions found for this customer.
-      </p>
+      <div className="border-border/60 flex flex-col items-center gap-2 rounded-xl border border-dashed py-10 text-center">
+        <div className="bg-muted text-muted-foreground flex size-10 items-center justify-center rounded-full">
+          <Sprout className="size-5" />
+        </div>
+        <p className="text-sm font-medium">No subscriptions yet</p>
+        <p className="text-muted-foreground text-xs">
+          This customer has had 0 subscriptions.
+        </p>
+      </div>
     );
   }
 
@@ -46,23 +53,63 @@ export function SubscriptionsPanel({
   const inactive = subscriptions.filter((s) => !s.isActive);
 
   return (
-    <div className="flex flex-col gap-3">
-      {active.map((sub) => (
-        <SubscriptionCard
-          key={sub.id}
-          sub={sub}
-          currency={currency}
-          onChanged={onChanged}
-        />
-      ))}
-      {inactive.map((sub) => (
-        <SubscriptionCard
-          key={sub.id}
-          sub={sub}
-          currency={currency}
-          onChanged={onChanged}
-        />
-      ))}
+    <div className="flex flex-col gap-4">
+      {active.length > 0 && (
+        <Section
+          label="Active"
+          count={active.length}
+          dotClass="bg-success"
+        >
+          {active.map((sub) => (
+            <SubscriptionCard
+              key={sub.id}
+              sub={sub}
+              currency={currency}
+              onChanged={onChanged}
+            />
+          ))}
+        </Section>
+      )}
+
+      {inactive.length > 0 && (
+        <Section
+          label="Cancelled / inactive"
+          count={inactive.length}
+          dotClass="bg-muted-foreground/50"
+        >
+          {inactive.map((sub) => (
+            <SubscriptionCard
+              key={sub.id}
+              sub={sub}
+              currency={currency}
+              onChanged={onChanged}
+            />
+          ))}
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function Section({
+  label,
+  count,
+  dotClass,
+  children,
+}: {
+  label: string;
+  count: number;
+  dotClass: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-muted-foreground flex items-center gap-1.5 px-0.5 text-xs font-medium uppercase tracking-wide">
+        <span className={cn('size-1.5 rounded-full', dotClass)} />
+        {label}
+        <span className="text-muted-foreground/70">· {count}</span>
+      </div>
+      {children}
     </div>
   );
 }
@@ -98,8 +145,13 @@ function SubscriptionCard({
   };
 
   return (
-    <Card className={sub.isActive ? '' : 'opacity-70'}>
-      <CardContent className="flex flex-col gap-3 py-4">
+    <Card
+      className={cn(
+        'gap-0 overflow-hidden border-l-4 py-0',
+        sub.isActive ? 'border-l-success' : 'border-l-border bg-muted/20',
+      )}
+    >
+      <CardContent className="flex flex-col gap-3 px-3.5 py-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5">
             <Badge variant={subscriptionStatusVariant(sub.status)}>
@@ -115,7 +167,7 @@ function SubscriptionCard({
           {sub.isActive && (
             <AlertDialog open={open} onOpenChange={setOpen}>
               <AlertDialogTrigger asChild>
-                <Button variant="destructive" size="sm">
+                <Button variant="destructive" size="sm" className="h-7 px-2.5">
                   Cancel
                 </Button>
               </AlertDialogTrigger>

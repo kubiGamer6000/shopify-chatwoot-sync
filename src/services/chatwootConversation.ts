@@ -16,6 +16,32 @@ export async function getConversationMessages(
   return res.data;
 }
 
+/**
+ * Returns the latest inbound (customer-authored) message in a conversation, or
+ * null if there are none. Skips private notes and agent/bot messages.
+ */
+export async function getLastCustomerMessage(
+  conversationId: number,
+): Promise<{ content: string; createdAt: string } | null> {
+  const res = await getConversationMessages(conversationId);
+  const incoming = res.payload
+    .filter(
+      (m) =>
+        m.message_type === 0 &&
+        !m.private &&
+        typeof m.content === 'string' &&
+        m.content.trim().length > 0,
+    )
+    .sort((a, b) => b.created_at - a.created_at);
+
+  const latest = incoming[0];
+  if (!latest || !latest.content) return null;
+  return {
+    content: latest.content,
+    createdAt: new Date(latest.created_at * 1000).toISOString(),
+  };
+}
+
 export async function getConversationDetails(
   conversationId: number,
 ): Promise<ChatwootConversation> {
@@ -76,4 +102,19 @@ export async function sendReply(
     messageId: res.data.id,
   });
   return res.data;
+}
+
+/**
+ * Marks a conversation as resolved via the toggle_status endpoint
+ * (`POST /conversations/{id}/toggle_status` with `{ status: 'resolved' }`),
+ * which is the standard accounts-API way to explicitly set conversation state.
+ */
+export async function resolveConversation(
+  conversationId: number,
+): Promise<void> {
+  await chatwootClient.post(
+    `/conversations/${conversationId}/toggle_status`,
+    { status: 'resolved' },
+  );
+  logger.info('Resolved conversation', { conversationId });
 }

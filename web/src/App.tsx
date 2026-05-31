@@ -144,21 +144,15 @@ function Loaded({
         onRefreshed={onSummaryRefreshed}
       />
 
-      {context.conversationId && <ResponseComposer context={context} />}
-
-      <Tabs defaultValue="orders" className="gap-3">
+      <Tabs defaultValue="subscriptions" className="gap-3">
         <TabsList className="w-full">
-          <TabsTrigger value="orders">
-            Orders ({profile.orders.length})
-          </TabsTrigger>
           <TabsTrigger value="subscriptions">
             Subscriptions{activeSubs > 0 ? ` (${activeSubs})` : ''}
           </TabsTrigger>
+          <TabsTrigger value="orders">
+            Orders ({profile.orders.length})
+          </TabsTrigger>
         </TabsList>
-
-        <TabsContent value="orders">
-          <OrdersList orders={profile.orders} />
-        </TabsContent>
 
         <TabsContent value="subscriptions">
           <SubscriptionsPanel
@@ -167,7 +161,13 @@ function Loaded({
             onChanged={onChanged}
           />
         </TabsContent>
+
+        <TabsContent value="orders">
+          <OrdersList orders={profile.orders} />
+        </TabsContent>
       </Tabs>
+
+      {context.conversationId && <ResponseComposer context={context} />}
     </>
   );
 }

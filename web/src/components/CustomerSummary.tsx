@@ -61,11 +61,13 @@ export function CustomerSummary({
   };
 
   return (
-    <Card className="bg-muted/30">
+    <Card className="border-info/20 bg-info/5">
       <CardContent className="flex flex-col gap-2 py-3">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-sm font-semibold">
-            <Sparkles className="text-info size-4" />
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <span className="bg-info/10 text-info flex size-6 items-center justify-center rounded-md">
+              <Sparkles className="size-3.5" />
+            </span>
             AI Summary
           </div>
           <div className="flex items-center gap-2">

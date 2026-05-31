@@ -70,7 +70,7 @@ A `17token` API key is sent on every request to `https://api.17track.net/track/v
 | `POST` | `/app/api/summary/refresh` | `x-app-token` | Regenerates the AI customer summary on demand |
 | `GET`  | `/app/api/draft` | `x-app-token` | Reads the latest stored AI draft (`?conversationId=`) |
 | `POST` | `/app/api/draft/generate` | `x-app-token` | Generates/regenerates a reply (instruction or correction) |
-| `POST` | `/app/api/draft/send` | `x-app-token` | Sends a reply to the customer in the conversation |
+| `POST` | `/app/api/draft/send` | `x-app-token` | Sends a reply to the customer and resolves the conversation (`resolve` defaults to true) |
 
 ---
 
@@ -256,7 +256,7 @@ In the dashboard the composer:
 2. Takes a free-form instruction (e.g. "apologize for the delay and offer a partial refund") and **Generate**s a reply via `POST /app/api/draft/generate`.
 3. Lets you iterate: type a correction (e.g. "don't say you give a refund, just offer one") and **Regenerate** — the backend sends your prior reply plus the correction as a follow-up turn and replaces the text in place (the UI never becomes a chat thread).
 4. Shows any `noteToAgent` in a separate "not sent" box.
-5. **Send message** posts the (optionally edited) reply to the customer as a public outgoing message via `POST /app/api/draft/send`.
+5. **Send message & resolve** posts the (optionally edited) reply to the customer as a public outgoing message and marks the conversation as resolved via `POST /app/api/draft/send` (which sends the reply, then calls Chatwoot's `toggle_status` with `status: resolved`). Sending is the critical step — if the resolve call fails the message is still delivered.
 
 Generation/storage are implemented in [`src/services/aiDraft.ts`](src/services/aiDraft.ts) (`gatherDraftContext`, `generateResponse`) and [`src/services/draftStore.ts`](src/services/draftStore.ts). Like the summary, persistence requires `FIREBASE_BASE64_SERVICE_ACCOUNT`; without it the composer still generates on demand but won't prefill a stored suggestion.
 
