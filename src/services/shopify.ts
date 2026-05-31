@@ -60,6 +60,24 @@ export async function fetchCustomerOrders(
   return allOrders;
 }
 
+export async function fetchCustomer(
+  customerId: number,
+): Promise<ShopifyCustomer | null> {
+  try {
+    const res = await withRetry(() =>
+      shopifyClient.get<{ customer: ShopifyCustomer }>(
+        `/customers/${customerId}.json`,
+      ),
+    );
+    return res.data.customer;
+  } catch (err) {
+    if (err instanceof AxiosError && err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 export async function fetchOrder(orderId: number): Promise<ShopifyOrder> {
   const res = await withRetry(() =>
     shopifyClient.get<{ order: ShopifyOrder }>(`/orders/${orderId}.json`),

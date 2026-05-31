@@ -36,6 +36,9 @@ export interface ShopifyFulfillment {
   id: number;
   order_id: number;
   status: string;
+  // Granular delivery state from the carrier, e.g. label_printed, in_transit,
+  // out_for_delivery, delivered, failure. Present once tracking events flow in.
+  shipment_status?: string | null;
   tracking_company?: string;
   tracking_number?: string;
   tracking_numbers?: string[];

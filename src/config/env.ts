@@ -11,6 +11,7 @@ const required = [
   'CHATWOOT_ACCOUNT_ID',
   'ANTHROPIC_API_KEY',
   'SEVENTEENTRACK_API_KEY',
+  'SKIO_API_KEY',
 ] as const;
 
 for (const key of required) {
@@ -45,4 +46,6 @@ export const env = {
   claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
   seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
+  skioApiKey: process.env.SKIO_API_KEY!,
+  dashboardAppToken: process.env.DASHBOARD_APP_TOKEN || '',
 };

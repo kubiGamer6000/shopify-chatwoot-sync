@@ -4,6 +4,7 @@ A Node.js/TypeScript server that:
 
 1. **Syncs Shopify customer and order data into Chatwoot**, giving support agents instant visibility into a customer's order history, tracking info, subscription status, and more.
 2. **Generates AI draft replies** using Claude whenever a customer messages support — drafts are posted as **private notes** in the Chatwoot conversation so agents can review/edit them before sending.
+3. **Serves a Chatwoot Dashboard App** (a "Customer 360" view) — an embedded React app that shows the customer's Shopify orders and live delivery status alongside their Skio subscriptions, and lets agents cancel a subscription in one click. See [Dashboard App (Customer 360)](#dashboard-app-customer-360).
 
 ## How It Works
 
@@ -62,6 +63,9 @@ A `17token` API key is sent on every request to `https://api.17track.net/track/v
 | `POST` | `/webhooks/orders` | HMAC | Shopify `orders/create`, `orders/updated`, `orders/fulfilled`, `orders/partially_fulfilled` events |
 | `POST` | `/sync/customers` | Bearer token | Triggers a manual full sync of all Shopify customers |
 | `POST` | `/chatwoot` | Optional `?secret=` | Chatwoot webhook → triggers AI draft generation |
+| `GET`  | `/app` | None (static) | Serves the embedded Dashboard App SPA (Customer 360) |
+| `GET`  | `/app/api/customer` | `x-app-token` | Aggregated customer profile (Shopify orders + Skio subscriptions) |
+| `POST` | `/app/api/subscriptions/:id/cancel` | `x-app-token` | Cancels a Skio subscription |
 
 ---
 
@@ -204,6 +208,66 @@ The AI draft flow is best-effort and never blocks the webhook 200 response:
 
 ---
 
+## Dashboard App (Customer 360)
+
+A [Chatwoot Dashboard App](https://www.chatwoot.com/docs/product/others/dashboard-apps/) is a web app embedded as an iframe in the agent's conversation view. This repo ships one — a **Customer 360** panel — built with React + Vite + Tailwind + shadcn/ui and served by the same Express server at **`/app`**.
+
+### What it shows
+
+- **Customer header** — name, email, phone, default address, and a link to the Shopify Admin customer page.
+- **Summary** — total orders, lifetime value, subscription-order count, active subscription count.
+- **Orders tab** — every order (newest first) with a derived delivery status badge (`Unfulfilled` / `In transit` / `Out for delivery` / `Delivered` / etc.), financial status, subscription tag (First / Recurring), line items, and a link to the order in Shopify Admin. Each order with tracking has a **collapsible** "Tracking" section (collapsed by default) showing carrier info and, when available, the live 17track status + recent events.
+- **Subscriptions tab** — Skio subscriptions with status, billing interval, products, and next billing date. Active subscriptions have a **Cancel** button (with a confirmation dialog) that calls the Skio API.
+
+### How it gets context
+
+Chatwoot pushes the active conversation/contact to the iframe via `window.postMessage` (`appContext` event). The SPA:
+
+1. On mount, posts `chatwoot-dashboard-app:fetch-info` to the parent window to request the current context.
+2. Listens for `message` events (validating `event.source === window.parent`), parses the `appContext` payload, and extracts the customer identity.
+3. Reacts to **conversation switching** — Chatwoot keeps the iframe alive and just pushes a new `appContext`, so the panel clears and refetches automatically when the agent opens a different conversation.
+
+Customer resolution mirrors the AI draft flow: it prefers the **`shopify_customer_id`** custom attribute (set by the sync flow), and falls back to the contact's **email**.
+
+### Data flow
+
+```
+Chatwoot iframe ──postMessage(appContext)──▶ Dashboard SPA (/app)
+                                                   │ GET /app/api/customer  (x-app-token)
+                                                   ▼
+                                      Express ─▶ Shopify (orders + delivery status)
+                                              ─▶ Skio    (subscriptions)
+                                              ─▶ 17track (optional live tracking)
+```
+
+The backend aggregator is [`src/services/customerProfile.ts`](src/services/customerProfile.ts). Delivery status is derived from Shopify itself (`fulfillment_status` + each fulfillment's `shipment_status`); 17track is used only to enrich the collapsible tracking detail.
+
+### Auth
+
+The agent-facing API (`/app/api/*`) is gated by a shared token via the `x-app-token` header. Set `DASHBOARD_APP_TOKEN` (backend) and the matching **build-time** `VITE_DASHBOARD_APP_TOKEN` (baked into the SPA bundle). Because the SPA runs in the agent's browser this token is not a strong secret — it gates casual access to an internal tool. If `DASHBOARD_APP_TOKEN` is unset, the API is left open (with a warning).
+
+The `/app` routes send a `Content-Security-Policy: frame-ancestors` header allowing `app.chatwoot.com` (and `*.chatwoot.com`) to embed the app.
+
+### Local development
+
+The SPA lives in [`web/`](web/) as its own Vite project:
+
+```bash
+cd web
+npm install
+npm run dev      # Vite dev server (postMessage features only work inside Chatwoot)
+```
+
+For production it is built to `web/dist` and served by Express — the root `npm run build` runs the web build first, then compiles the server (see [Setup](#setup)).
+
+### Register it in Chatwoot
+
+1. Go to **Settings → Integrations → Dashboard Apps → Configure → Add a new dashboard app**.
+2. Name it (e.g. "Customer 360") and set the URL to `https://<your-domain>/app`.
+3. Save. A new tab appears in the conversation view; open it to see the panel.
+
+---
+
 ## Rate Limiting
 
 All API clients handle rate limiting automatically:
@@ -229,7 +293,10 @@ src/
 ├── routes/
 │   ├── webhooks.ts          # Shopify webhook handlers (customers, orders)
 │   ├── sync.ts              # Manual sync trigger endpoint
-│   └── chatwootWebhook.ts   # Chatwoot webhook → triggers AI draft
+│   ├── chatwootWebhook.ts   # Chatwoot webhook → triggers AI draft
+│   └── dashboardApp.ts      # Dashboard App API (customer profile, cancel subscription)
+├── middleware/
+│   └── appAuth.ts           # Shared-token auth for the Dashboard App API
 ├── services/
 │   ├── shopifyAuth.ts            # OAuth client_credentials token management
 │   ├── shopify.ts                # Shopify REST API client (customers, orders, search-by-email)
@@ -238,17 +305,31 @@ src/
 │   ├── tracking.ts               # 17track register + gettrackinfo client
 │   ├── claude.ts                 # Anthropic Messages API wrapper
 │   ├── aiDraft.ts                # Orchestrator: webhook → context → Claude → private note
+│   ├── skio.ts                   # Skio GraphQL client (subscriptions + cancel)
+│   ├── customerProfile.ts        # Dashboard App aggregator: Shopify orders + Skio subs
 │   └── sync.ts                   # Full sync logic and periodic scheduler
 ├── types/
 │   ├── index.ts             # Shopify + Chatwoot REST types
 │   ├── chatwoot.ts          # Chatwoot webhook + conversation types
-│   └── tracking.ts          # 17track types
+│   ├── tracking.ts          # 17track types
+│   └── skio.ts              # Skio subscription types
 ├── utils/
 │   ├── formatters.ts        # Order formatting, phone normalization, attribute building
 │   ├── promptBuilder.ts     # Builds the structured user prompt for Claude
 │   └── logger.ts            # Structured console logger
 ├── app.ts                   # Express app configuration and middleware wiring
 └── server.ts                # Entry point, starts server and periodic sync
+
+web/                         # Chatwoot Dashboard App (Vite + React + Tailwind + shadcn)
+├── src/
+│   ├── lib/
+│   │   ├── chatwoot.ts      # postMessage bridge (appContext listener + fetch-info)
+│   │   ├── api.ts           # Calls /app/api/* with x-app-token
+│   │   ├── types.ts         # DTO + appContext interfaces
+│   │   └── format.ts        # Money/date/status formatting helpers
+│   ├── components/          # ProfileHeader, SummaryRow, OrdersList, SubscriptionsPanel, ui/
+│   └── App.tsx              # Orchestrator (context → fetch → tabs)
+└── (built to web/dist, served by Express at /app)
 ```
 
 ---
@@ -265,6 +346,7 @@ src/
 | `CHATWOOT_ACCOUNT_ID` | Yes | Chatwoot account ID |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude |
 | `SEVENTEENTRACK_API_KEY` | Yes | 17track API key (header `17token`) |
+| `SKIO_API_KEY` | Yes | Skio API key (sent as `Authorization: API <key>`) for subscriptions + cancel |
 | `CHATWOOT_INBOX_ID` | No | Inbox ID for new contact creation (required to create contacts) |
 | `SYNC_API_KEY` | No | Bearer token to protect the `/sync` endpoint |
 | `SYNC_INTERVAL_HOURS` | No | Periodic sync interval in hours (default: `0` = disabled) |
@@ -272,6 +354,8 @@ src/
 | `CLAUDE_SYSTEM_PROMPT` | No | Inline override for the system prompt. If unset, falls back to `src/config/systemPrompt.txt` |
 | `CLAUDE_MODEL` | No | Anthropic model id (default: `claude-sonnet-4-20250514`) |
 | `CHATWOOT_WEBHOOK_SECRET` | No | If set, the Chatwoot webhook URL must include `?secret=<value>` |
+| `DASHBOARD_APP_TOKEN` | No | Shared token the Dashboard App sends (`x-app-token`) to call `/app/api/*`. If unset, the API is unprotected |
+| `VITE_DASHBOARD_APP_TOKEN` | No | Build-time copy of the token, baked into the SPA bundle. Must match `DASHBOARD_APP_TOKEN` |
 | `DEBUG` | No | If truthy, posts the full Claude prompt as an additional private note (do not use in prod) |
 
 ---
@@ -284,8 +368,10 @@ src/
 cp .env.example .env
 # fill in the values from the sections below
 npm install
-npm run dev    # tsx watch mode
+npm run dev    # tsx watch mode (server)
 ```
+
+The Dashboard App SPA lives in [`web/`](web/) and has its own dependencies. `npm run build` (and the DO deploy) builds it automatically; for local SPA work run `cd web && npm install && npm run dev`. See [Dashboard App (Customer 360)](#dashboard-app-customer-360).
 
 ### 2. Shopify
 
@@ -342,6 +428,16 @@ You can verify it's working by sending a test customer message into the inbox �
 1. Sign up at https://api.17track.net and create an API key → set as `SEVENTEENTRACK_API_KEY`.
 2. No further setup needed. Tracking numbers are auto-registered by the order webhook (in the background) and again by the AI draft flow if any are still unknown at draft time.
 
+### 6. Skio
+
+1. In your Skio dashboard, open the **API** section and generate an API key → set as `SKIO_API_KEY`.
+2. It is sent as the `Authorization: API <key>` header to `https://graphql.skio.com/v1/graphql`. Used by the Dashboard App to read subscriptions and cancel them.
+
+### 7. Dashboard App
+
+1. (Optional but recommended) generate a random secret and set both `DASHBOARD_APP_TOKEN` and `VITE_DASHBOARD_APP_TOKEN` to the same value.
+2. Deploy, then register the app in Chatwoot under **Settings → Integrations → Dashboard Apps** with URL `https://<your-domain>/app`. Full details in [Dashboard App (Customer 360)](#dashboard-app-customer-360).
+
 ---
 
 ## Deployment (DigitalOcean App Platform)
@@ -349,7 +445,7 @@ You can verify it's working by sending a test customer message into the inbox �
 The repo includes a `.do/app.yaml` spec for DigitalOcean App Platform:
 
 - **Runtime**: Node.js 22
-- **Build**: `npm run build` (TypeScript → `dist/`)
+- **Build**: `npm run build` — builds the Dashboard App SPA (`web/` → `web/dist/`) then compiles the server (TypeScript → `dist/`)
 - **Start**: `npm start` (`node dist/server.js`)
 - **Health check**: `GET /health`
 - **Port**: 8080

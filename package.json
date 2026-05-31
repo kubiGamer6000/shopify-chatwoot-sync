@@ -5,7 +5,9 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build:web": "cd web && npm install && npm run build",
+    "build:server": "tsc",
+    "build": "npm run build:web && npm run build:server",
     "start": "node dist/server.js"
   },
   "engines": {

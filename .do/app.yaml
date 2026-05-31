@@ -50,3 +50,18 @@ services:
       - key: SYNC_INTERVAL_HOURS
         scope: RUN_AND_BUILD_TIME
         value: "6"
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: SEVENTEENTRACK_API_KEY
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: SKIO_API_KEY
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: DASHBOARD_APP_TOKEN
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      - key: VITE_DASHBOARD_APP_TOKEN
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
