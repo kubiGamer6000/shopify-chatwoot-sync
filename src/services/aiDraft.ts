@@ -157,10 +157,19 @@ export async function gatherDraftContext(params: {
     }
   }
 
-  const customerMessage = currentMessages
+  const customerMessageBody = currentMessages
     .filter((m) => m.message_type === 0 && !m.private)
     .sort((a, b) => a.created_at - b.created_at)
     .map((m) => m.content)
+    .filter(Boolean)
+    .join('\n\n');
+
+  // The order number / alternate email often lives in the email subject (e.g.
+  // "WHERES MY ORDER #11789??"), so include it for the matcher agent.
+  const customerMessage = [
+    mailSubject ? `Subject: ${mailSubject}` : '',
+    customerMessageBody,
+  ]
     .filter(Boolean)
     .join('\n\n');
 
