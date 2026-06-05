@@ -106,6 +106,7 @@ When a customer is synced (via webhook or bulk sync), the server:
 | `last_order_tracking_url` | Link | Tracking URL from the latest fulfillment |
 | `default_address` | Text | Formatted default address |
 | `recent_orders` | Text | Summary of up to 10 recent orders with dates, amounts, statuses, and tracking links |
+| `shopify_email_link` | Text | Optional override email. When set, **all** Shopify lookups (AI drafts, summaries, dashboard quick panel) use this address instead of the contact's own email. Set manually by an agent or automatically by the AI matcher (see [Unmatched-Contact Matching](#unmatched-contact-matching)). Leave empty by default. |
 
 ---
 
@@ -169,9 +170,11 @@ The full pipeline is in [`src/services/aiDraft.ts`](src/services/aiDraft.ts):
    - `GET /conversations/:id/messages` — full message thread of the current conversation.
    - `GET /conversations/:id` — conversation details, including the contact's custom attributes (this is how we read `shopify_customer_id`).
    - `GET /contacts/:contact_id/conversations` — the contact's previous conversations (for historical context).
-2. **Resolve the Shopify customer**:
-   - First try the `shopify_customer_id` custom attribute on the Chatwoot contact (set by the sync flow).
+2. **Resolve the Shopify customer** (precedence: `shopify_email_link` override → `shopify_customer_id` → contact email):
+   - If the contact has a `shopify_email_link` custom attribute, that address is used for the lookup instead of the contact's own email.
+   - Otherwise try the `shopify_customer_id` custom attribute on the Chatwoot contact (set by the sync flow).
    - If that fails or returns no orders, fall back to `GET /customers/search.json?query=email:...` on the Shopify Admin API.
+   - **If the contact still has no orders** and isn't already linked, the [Unmatched-Contact Matching](#unmatched-contact-matching) agent runs before the draft is written.
 3. **Fetch live tracking** from 17track for the **last 2 fulfilled orders' tracking numbers**:
    - Calls `POST /track/v2.2/gettrackinfo`.
    - Any tracking numbers rejected as "not registered" are auto-registered via `POST /track/v2.2/register` and re-queried after a 3s delay.
@@ -210,6 +213,31 @@ The AI draft flow is best-effort and never blocks the webhook 200 response:
 - A failure to fetch Shopify data, tracking data, or generate a draft is logged but does not crash the request.
 - If `CLAUDE_SYSTEM_PROMPT` (and `systemPrompt.txt`) are both empty, the flow logs a warning and skips — no private note is posted.
 - If Claude returns no text content, a warning is logged and no note is posted.
+
+### Unmatched-Contact Matching
+
+Customers often email from a different address than the one on their Shopify account (e.g. they ordered with `john@gmail.com` but write in from `john@icloud.com`). When that happens the contact has no synced data, the dashboard panel is empty, and the AI draft has no order context to work with. But the customer frequently *tells us* what we need — "where is my order #11696?" or "I ordered with john@gmail.com".
+
+To recover that, the AI draft flow runs a small **tool-using agent** ([`src/services/customerResolver.ts`](src/services/customerResolver.ts)) built on the Anthropic SDK's [Tool Runner](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner). It only runs when **both** are true:
+
+- The contact is **not matched** — no Shopify account, or an account with **zero orders** (a 0-order account counts as unmatched).
+- The contact is **not already linked** — `shopify_email_link` is empty (once linked, the tools are never offered again for that contact).
+
+The agent (Claude Sonnet, `CLAUDE_MODEL`) is given the customer's message and two client tools:
+
+| Tool | Purpose |
+|------|---------|
+| `search_customer_by_email` | Looks up a Shopify customer by an alternate email the customer provided, returns their orders. |
+| `search_customer_by_order_number` | Looks up an order by number (`#11696`), resolves the owning customer, returns their orders. |
+
+The agent calls a tool **only** when the message clearly contains a usable alternate email or order number; otherwise it does nothing. On a successful match (a customer with ≥1 order) the tool:
+
+1. **Writes `shopify_email_link`** back to the Chatwoot contact (`PUT /contacts/:id`), so every future lookup — AI drafts, summaries, and the dashboard quick panel — resolves the right customer automatically.
+2. Returns the customer + orders so the draft is then **regenerated with full context** (orders, tracking, etc.).
+
+If no match is found (no usable info in the message), the prompt gains a `--- CUSTOMER NOT MATCHED ---` block instructing the AI to politely ask for an order number / original email **only when the request actually needs order data** (business/product enquiries are answered normally). The final output is always the same structured draft (customer reply + optional note to agent).
+
+> A human agent can also set `shopify_email_link` by hand from the Chatwoot contact sidebar to force the correct match at any time.
 
 ---
 
@@ -268,7 +296,7 @@ Chatwoot pushes the active conversation/contact to the iframe via `window.postMe
 2. Listens for `message` events (validating `event.source === window.parent`), parses the `appContext` payload, and extracts the customer identity.
 3. Reacts to **conversation switching** — Chatwoot keeps the iframe alive and just pushes a new `appContext`, so the panel clears and refetches automatically when the agent opens a different conversation.
 
-Customer resolution mirrors the AI draft flow: it prefers the **`shopify_customer_id`** custom attribute (set by the sync flow), and falls back to the contact's **email**.
+Customer resolution mirrors the AI draft flow: a **`shopify_email_link`** override (if set) wins, then the **`shopify_customer_id`** custom attribute (set by the sync flow), then the contact's **email**. See [Unmatched-Contact Matching](#unmatched-contact-matching) for how the override gets set.
 
 ### Data flow
 
@@ -354,12 +382,13 @@ src/
 │   └── appAuth.ts           # Shared-token auth for the Dashboard App API
 ├── services/
 │   ├── shopifyAuth.ts            # OAuth client_credentials token management
-│   ├── shopify.ts                # Shopify REST API client (customers, orders, search-by-email)
+│   ├── shopify.ts                # Shopify REST API client (customers, orders, search by email/order number)
 │   ├── chatwoot.ts               # Chatwoot API client (filter, create, update, upsert)
 │   ├── chatwootConversation.ts   # Conversation/message reads + private note writes
 │   ├── tracking.ts               # 17track register + gettrackinfo client
 │   ├── claude.ts                 # Anthropic Messages API wrapper
 │   ├── aiDraft.ts                # Orchestrator: webhook → context → Claude → private note
+│   ├── customerResolver.ts       # Tool-using agent that matches unmatched contacts via email/order#
 │   ├── skio.ts                   # Skio GraphQL client (subscriptions + cancel)
 │   ├── customerProfile.ts        # Dashboard App aggregator: Shopify orders + Skio subs
 │   ├── firestore.ts              # Lazy firebase-admin init (AI summary + draft storage)

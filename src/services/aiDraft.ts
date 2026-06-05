@@ -9,6 +9,7 @@ import {
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
+import { resolveUnmatchedCustomer } from './customerResolver.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
 import {
   gatherConversationsWithMessages,
@@ -21,15 +22,42 @@ import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { TrackingSummary } from '../types/tracking.js';
 
 /**
+ * Signals about how the contact resolved to a Shopify account, used to decide
+ * whether the AI matcher tools should run and how the draft prompt is shaped.
+ */
+export interface DraftLookupMeta {
+  // True when the resolved Shopify customer has at least one order.
+  matched: boolean;
+  // True when a `shopify_email_link` override is already set on the contact.
+  alreadyLinked: boolean;
+  // The contact's default Chatwoot email.
+  chatwootEmail: string | null;
+  // The override email, when present.
+  shopifyEmailLink: string | null;
+  // Current contact custom attributes (preserved when writing the link back).
+  customAttributes: Record<string, unknown>;
+  // Concatenated text of the customer's messages in the current conversation.
+  customerMessage: string;
+}
+
+export interface GatheredDraftContext {
+  context: PromptContext;
+  lookup: DraftLookupMeta;
+}
+
+/**
  * Gathers all Chatwoot + Shopify + tracking context for a conversation and
- * returns a ready-to-use PromptContext. Shared by the incoming-message webhook
- * flow and the on-demand dashboard composer.
+ * returns a ready-to-use PromptContext plus lookup metadata. Shared by the
+ * incoming-message webhook flow and the on-demand dashboard composer.
+ *
+ * Lookup precedence: an explicit `shopify_email_link` override wins, then the
+ * Shopify customer id, then the contact's default email.
  */
 export async function gatherDraftContext(params: {
   conversationId: number;
   contactId: number;
   email?: string | null;
-}): Promise<PromptContext> {
+}): Promise<GatheredDraftContext> {
   const { conversationId, contactId } = params;
 
   // Phase 1: Fetch Chatwoot context in parallel
@@ -41,8 +69,22 @@ export async function gatherDraftContext(params: {
 
   const currentMessages = messagesRes.payload;
   const customerName = conversationDetails.meta?.sender?.name;
-  const email =
-    conversationDetails.meta?.sender?.email || params.email || undefined;
+
+  const customAttributes =
+    (conversationDetails.meta?.sender?.custom_attributes as
+      | Record<string, unknown>
+      | undefined) ?? {};
+
+  const chatwootEmail =
+    conversationDetails.meta?.sender?.email || params.email || null;
+
+  const rawLink = customAttributes['shopify_email_link'];
+  const shopifyEmailLink =
+    typeof rawLink === 'string' && rawLink.trim() ? rawLink.trim() : null;
+
+  // The email used for Shopify lookups: explicit override wins over the
+  // contact's default address.
+  const email = shopifyEmailLink || chatwootEmail || undefined;
 
   // Extract email subject: conversation-level first, then fall back to first message
   const mailSubject =
@@ -62,9 +104,9 @@ export async function gatherDraftContext(params: {
   let shopifyCustomer: ShopifyCustomer | null = null;
   let orders: ShopifyOrder[] = [];
 
-  const shopifyCustomerId = conversationDetails.meta?.sender?.custom_attributes?.[
-    'shopify_customer_id'
-  ] as string | undefined;
+  const shopifyCustomerId = customAttributes['shopify_customer_id'] as
+    | string
+    | undefined;
 
   if (shopifyCustomerId) {
     logger.debug('Found Shopify customer ID in Chatwoot custom attributes', {
@@ -115,18 +157,78 @@ export async function gatherDraftContext(params: {
     }
   }
 
+  const customerMessage = currentMessages
+    .filter((m) => m.message_type === 0 && !m.private)
+    .sort((a, b) => a.created_at - b.created_at)
+    .map((m) => m.content)
+    .filter(Boolean)
+    .join('\n\n');
+
   return {
-    customerName,
-    customerEmail: email,
-    shopifyCustomer,
-    orders,
-    trackingByNumber,
-    currentMessages,
-    previousConversations: contactConversations,
-    conversationId,
-    isNewConversation,
-    emailSubject: mailSubject,
+    context: {
+      customerName,
+      customerEmail: email,
+      shopifyCustomer,
+      orders,
+      trackingByNumber,
+      currentMessages,
+      previousConversations: contactConversations,
+      conversationId,
+      isNewConversation,
+      emailSubject: mailSubject,
+    },
+    lookup: {
+      matched: orders.length > 0,
+      alreadyLinked: Boolean(shopifyEmailLink),
+      chatwootEmail,
+      shopifyEmailLink,
+      customAttributes,
+      customerMessage,
+    },
   };
+}
+
+/**
+ * Appended to the prompt when we have no order data for the contact, so the AI
+ * knows to ask for an order number / original email when (and only when) the
+ * request actually depends on their order history.
+ */
+const LOOKUP_GUIDANCE =
+  "This contact could NOT be matched to a Shopify account with any orders — " +
+  'either they have never ordered, or (more likely) they wrote in from a ' +
+  'different email than the one they used to order. We checked their message ' +
+  'and could not find a usable order number or alternative email to look them ' +
+  'up with. If their request depends on their order/customer data (e.g. "where ' +
+  'is my order", a refund, a delivery issue), politely explain you cannot ' +
+  'locate their order from this email and ask them to reply with their order ' +
+  'number or the email address they used at checkout so you can pull it up. If ' +
+  'their request does NOT need order data (e.g. a general/business enquiry, a ' +
+  'product question), just answer normally and do not ask for an order number.';
+
+/**
+ * Merges a successful resolution back into the prompt context: replaces the
+ * orders + customer and recomputes tracking so the draft is written with the
+ * real, full customer history.
+ */
+async function applyResolution(
+  ctx: PromptContext,
+  resolved: { shopifyCustomer: ShopifyCustomer | null; orders: ShopifyOrder[]; linkedEmail: string | null },
+): Promise<void> {
+  ctx.orders = resolved.orders;
+  ctx.shopifyCustomer = resolved.shopifyCustomer;
+  if (resolved.linkedEmail) ctx.customerEmail = resolved.linkedEmail;
+
+  ctx.trackingByNumber = new Map();
+  const trackingNumbers = extractTrackingNumbers(resolved.orders);
+  if (trackingNumbers.length > 0) {
+    try {
+      ctx.trackingByNumber = await getTrackingStatus(trackingNumbers);
+    } catch (err) {
+      logger.warn('Failed to fetch tracking status after resolution', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 /**
@@ -155,11 +257,36 @@ export async function handleIncomingMessage(
     return;
   }
 
-  const ctx = await gatherDraftContext({
+  const { context: ctx, lookup } = await gatherDraftContext({
     conversationId,
     contactId,
     email: contactEmail,
   });
+
+  // When the contact isn't matched to a Shopify account with orders — and a
+  // human hasn't already linked one — run the tool-using matcher agent. If the
+  // customer supplied an alternate email or order number it will find them,
+  // link the email for future lookups, and enrich the context here.
+  if (!lookup.matched && !lookup.alreadyLinked) {
+    logger.info('Contact unmatched — running Shopify matcher agent', {
+      conversationId,
+      contactId,
+    });
+    const resolved = await resolveUnmatchedCustomer({
+      contactId,
+      customerMessage: lookup.customerMessage,
+      chatwootEmail: lookup.chatwootEmail,
+      existingCustomAttributes: lookup.customAttributes,
+    });
+    if (resolved.resolved) {
+      await applyResolution(ctx, resolved);
+    }
+  }
+
+  // Still no order data? Tell the AI to ask for an order number / email.
+  if (ctx.orders.length === 0) {
+    ctx.lookupGuidance = LOOKUP_GUIDANCE;
+  }
 
   const userPrompt = buildPrompt(ctx);
 
@@ -223,11 +350,15 @@ export async function generateResponse(params: {
     return null;
   }
 
-  const ctx = await gatherDraftContext({
+  const { context: ctx } = await gatherDraftContext({
     conversationId: params.conversationId,
     contactId: params.contactId,
     email: params.email,
   });
+
+  if (ctx.orders.length === 0) {
+    ctx.lookupGuidance = LOOKUP_GUIDANCE;
+  }
 
   const isRevision = Boolean(
     params.previousResponse && params.correction && params.correction.trim(),

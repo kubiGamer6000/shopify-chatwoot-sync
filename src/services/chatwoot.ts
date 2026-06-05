@@ -122,6 +122,38 @@ export async function updateContact(
 }
 
 /**
+ * Sets the `shopify_email_link` custom attribute on a contact so future Shopify
+ * lookups (AI drafts, summaries, the dashboard quick panel) resolve against the
+ * customer's real account email instead of the address they happened to write
+ * from. Existing custom attributes are preserved by merging them back in, since
+ * Chatwoot replaces the `custom_attributes` object wholesale on update.
+ * Best-effort: failures are logged and swallowed so callers never break.
+ */
+export async function linkShopifyEmail(
+  contactId: number,
+  email: string,
+  existingCustomAttributes: Record<string, unknown> = {},
+): Promise<boolean> {
+  try {
+    const merged = {
+      ...existingCustomAttributes,
+      shopify_email_link: email,
+    } as ChatwootContactPayload['custom_attributes'];
+
+    await updateContact(contactId, { custom_attributes: merged });
+    logger.info('Linked Shopify email to Chatwoot contact', { contactId, email });
+    return true;
+  } catch (err) {
+    logger.warn('Failed to set shopify_email_link custom attribute', {
+      contactId,
+      email,
+      detail: extractErrorDetail(err),
+    });
+    return false;
+  }
+}
+
+/**
  * Smart upsert with exact-match filters and 422 retry.
  *
  * 1. Filter by identifier (Shopify ID) — fast path for linked contacts.

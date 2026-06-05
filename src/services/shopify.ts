@@ -144,4 +144,30 @@ export async function searchCustomerByEmail(
   return res.data.customers[0] ?? null;
 }
 
+/**
+ * Finds an order by its human-facing order number (the `name` field, e.g.
+ * "#11696"). Accepts the number with or without the leading "#". Returns the
+ * order (which embeds the `customer` object) or null when no order matches.
+ * Tries the "#"-prefixed name first since that is Shopify's canonical format.
+ */
+export async function searchOrderByName(
+  orderNumber: string,
+): Promise<ShopifyOrder | null> {
+  const trimmed = orderNumber.trim().replace(/^#/, '');
+  if (!trimmed) return null;
+
+  const candidates = [`#${trimmed}`, trimmed];
+  for (const name of candidates) {
+    const res = await withRetry(() =>
+      shopifyClient.get<{ orders: ShopifyOrder[] }>(
+        `/orders.json?status=any&name=${encodeURIComponent(name)}`,
+      ),
+    );
+    if (res.data.orders.length > 0) {
+      return res.data.orders[0] ?? null;
+    }
+  }
+  return null;
+}
+
 export { sleep };

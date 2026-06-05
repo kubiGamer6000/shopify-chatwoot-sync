@@ -33,12 +33,27 @@ function resolveContext(ctx: ChatwootAppContext): ResolvedContext {
       ? String(rawShopifyId)
       : null;
 
-  const email = contact?.email || sender?.email || null;
+  // An agent (or the AI matcher) can set `shopify_email_link` when the customer
+  // wrote in from a different address than the one on their Shopify account.
+  // When present it's authoritative: use it for the lookup and ignore any
+  // (likely absent/stale) Shopify id so the panel resolves the real customer.
+  const rawLink = customAttrs['shopify_email_link'];
+  const shopifyEmailLink =
+    typeof rawLink === 'string' && rawLink.trim() ? rawLink.trim() : null;
+
+  const defaultEmail = contact?.email || sender?.email || null;
+  const email = shopifyEmailLink || defaultEmail;
   const contactName = contact?.name || sender?.name || null;
   const conversationId = ctx.conversation?.id ?? null;
   const contactId = contact?.id ?? sender?.id ?? null;
 
-  return { conversationId, contactId, shopifyCustomerId, email, contactName };
+  return {
+    conversationId,
+    contactId,
+    shopifyCustomerId: shopifyEmailLink ? null : shopifyCustomerId,
+    email,
+    contactName,
+  };
 }
 
 export function requestContext(): void {

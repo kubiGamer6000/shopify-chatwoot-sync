@@ -94,6 +94,11 @@ export interface ChatwootCustomAttributes {
   default_address: string;
   recent_orders: string;
   subscription_orders: number;
+  // Override email a human agent (or the AI matcher) can set when the customer
+  // wrote in from a different address than the one on their Shopify account.
+  // When present, this email is used for all Shopify lookups instead of the
+  // contact's default email.
+  shopify_email_link: string;
 }
 
 export interface ChatwootContactPayload {

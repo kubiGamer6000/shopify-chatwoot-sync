@@ -17,6 +17,11 @@ export interface PromptContext {
   // Free-form instruction from a human agent (dashboard composer). When present,
   // it takes precedence over the default playbook for how to respond.
   agentInstruction?: string;
+  // Guidance appended when the contact could not be matched to a Shopify
+  // account with orders (e.g. they wrote from a different email and gave no
+  // order number). Tells the AI to ask for an order number / original email if
+  // the request actually needs their order data.
+  lookupGuidance?: string;
 }
 
 export function buildPrompt(ctx: PromptContext): string {
@@ -29,6 +34,10 @@ export function buildPrompt(ctx: PromptContext): string {
   sections.push(buildTrackingSection(ctx.orders, ctx.trackingByNumber));
   sections.push(buildCurrentConversationSection(ctx.currentMessages, ctx.emailSubject));
   sections.push(buildPreviousConversationsSection(ctx.previousConversations, ctx.conversationId));
+
+  if (ctx.lookupGuidance && ctx.lookupGuidance.trim()) {
+    sections.push(`--- CUSTOMER NOT MATCHED ---\n${ctx.lookupGuidance.trim()}`);
+  }
 
   if (ctx.agentInstruction && ctx.agentInstruction.trim()) {
     sections.push(
