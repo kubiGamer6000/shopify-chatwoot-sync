@@ -71,3 +71,6 @@ services:
       - key: CHATWOOT_AGENT_BOT_SECRET
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      - key: AGENT_BOT_HOLDING_REPLY
+        scope: RUN_AND_BUILD_TIME
+        value: "true"

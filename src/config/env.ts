@@ -51,6 +51,11 @@ export const env = {
     process.env.CLAUDE_RESPONDER_PROMPT || loadPromptFile('responderPrompt.txt'),
   // Optional shared secret for the AgentBot webhook (?secret=... query param).
   agentBotWebhookSecret: process.env.CHATWOOT_AGENT_BOT_SECRET || '',
+  // When false, escalations send NO holding reply to the customer — the bot just
+  // hands the conversation off to a human (sets it open) and generates a draft.
+  // Defaults to true. Set AGENT_BOT_HOLDING_REPLY=false to disable.
+  agentBotHoldingReplyEnabled:
+    (process.env.AGENT_BOT_HOLDING_REPLY || 'true').toLowerCase() !== 'false',
   seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
   skioApiKey: process.env.SKIO_API_KEY!,

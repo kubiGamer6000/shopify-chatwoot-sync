@@ -70,11 +70,19 @@ async function hardEscalate(params: {
 }): Promise<void> {
   const { conversationId, contactId, email, ctx, reason } = params;
   try {
-    const holding = await generateHoldingReply(ctx);
-    await sendReply(conversationId, formatResponderMessage(holding));
+    // Holding reply is optional (AGENT_BOT_HOLDING_REPLY). When disabled, the
+    // bot stays silent and just hands the conversation to a human.
+    if (env.agentBotHoldingReplyEnabled) {
+      const holding = await generateHoldingReply(ctx);
+      await sendReply(conversationId, formatResponderMessage(holding));
+    }
     await setConversationStatus(conversationId, 'open');
     await postAiDraft({ conversationId, contactId, email, escalation: true });
-    logger.info('Hard-escalated conversation', { conversationId, reason });
+    logger.info('Hard-escalated conversation', {
+      conversationId,
+      reason,
+      holdingReply: env.agentBotHoldingReplyEnabled,
+    });
   } catch (err) {
     logger.error('Hard escalation failed', {
       conversationId,
@@ -151,7 +159,11 @@ async function runResponderAgent(params: {
     run: async ({ reason, holding_reply }) => {
       escalated = true;
       try {
-        await sendReply(conversationId, formatResponderMessage(holding_reply));
+        // Holding reply is optional (AGENT_BOT_HOLDING_REPLY). When disabled,
+        // the bot stays silent and just hands the conversation to a human.
+        if (env.agentBotHoldingReplyEnabled) {
+          await sendReply(conversationId, formatResponderMessage(holding_reply));
+        }
         await setConversationStatus(conversationId, 'open');
         await postAiDraft({ conversationId, contactId, email, escalation: true });
       } catch (err) {
@@ -160,8 +172,14 @@ async function runResponderAgent(params: {
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      logger.info('Responder escalated conversation', { conversationId, reason });
-      return 'Conversation escalated to a human and the holding reply was sent. You are done; do not write any further message.';
+      logger.info('Responder escalated conversation', {
+        conversationId,
+        reason,
+        holdingReply: env.agentBotHoldingReplyEnabled,
+      });
+      return env.agentBotHoldingReplyEnabled
+        ? 'Conversation escalated to a human and the holding reply was sent. You are done; do not write any further message.'
+        : 'Conversation escalated to a human (no holding reply sent). You are done; do not write any further message.';
     },
   });
 
@@ -230,6 +248,7 @@ async function runResponderAgent(params: {
     }
 
     await sendReply(conversationId, formatResponderMessage(text));
+    await addConversationLabels(conversationId, ['ai-response']);
     await resolveConversation(conversationId);
     logger.info('Responder replied and resolved conversation', { conversationId });
   } catch (err) {

@@ -265,7 +265,7 @@ Every inbound message (on both paths) is classified by a cheap model (`CLAUDE_CL
 
 `business`, `change-address`, `change-contact`, `sub-cancel`, `refund`, `discount-issue`, `missing-packs`, `no-country`, `not-delivered`, `order-status`, `product-defect`, `other`.
 
-Labels are **add-only**: the classifier merges new labels into the conversation via `POST /conversations/{id}/labels` (read current → union → write) and never removes any. **Action labels** (e.g. `refund-30/50/70/full`, `reshipped`, `changed-address`, `sub-cancelled`, `sub-cancelled-ai`) are reserved for agents/tools and are never AI-assignable.
+Labels are **add-only**: the classifier merges new labels into the conversation via `POST /conversations/{id}/labels` (read current → union → write) and never removes any. **Action labels** (e.g. `refund-30/50/70/full`, `reshipped`, `changed-address`, `sub-cancelled`, `sub-cancelled-ai`, `ai-response`) are reserved for agents/tools and are never AI-assignable.
 
 ### Routing & escalation ([`src/services/aiResponder.ts`](src/services/aiResponder.ts))
 
@@ -281,12 +281,14 @@ The responder agent has two tools:
 - **`escalate_to_human(reason, holding_reply)`** — always available. The agent writes a short, **context-aware** `holding_reply`; the tool sends it to the customer, sets the conversation to **`open`**, and triggers an **escalation draft** for the human agent.
 - **`cancel_subscription()`** — injected only when the `sub-cancel` label is present. Cancels the customer's active Skio subscription(s) by their linked email (`cancelActiveSubscriptionsByEmail`) and adds the **`sub-cancelled-ai`** label. The agent only uses it when the customer insists we cancel for them (or can't self-serve); by default it sends the self-service link instead.
 
-#### Contextual holding reply
+#### Contextual holding reply (optional)
 
-The escalation message is not a fixed string — it is lightly tailored to the conversation while keeping the same intent ("we need a bit of extra help; a team member will be in touch shortly"):
+On escalation, the bot can send the customer a brief holding message before handing off. This is controlled by **`AGENT_BOT_HOLDING_REPLY`** (default `true`):
 
-- **Tool escalations:** the responder agent writes `holding_reply` directly.
-- **Hard-filter escalations** (no agent call): a small dedicated Haiku call crafts a brief contextual holding reply, with a fixed sentence as a fallback if it fails.
+- **`true`** — a contextual holding reply is sent. It is not a fixed string; it is lightly tailored to the conversation while keeping the same intent ("we need a bit of extra help; a team member will be in touch shortly"):
+  - **Tool escalations:** the responder agent writes `holding_reply` directly.
+  - **Hard-filter escalations** (no agent call): a small dedicated Haiku call crafts a brief contextual holding reply, with a fixed sentence as a fallback if it fails.
+- **`false`** — the bot sends **nothing** to the customer on escalation. It silently sets the conversation to `open` and generates the human draft (see below). Use this when you'd rather a human send the first reply with no automated holding message.
 
 #### Escalation also drafts for the human
 
@@ -294,7 +296,7 @@ Whenever the bot escalates (hard filter or tool), it calls the draft generator w
 
 ### Manual Chatwoot setup
 
-1. Create the **`sub-cancelled-ai`** label (Settings → Labels). The classification labels above are also worth creating as labels for filtering.
+1. Create the **`sub-cancelled-ai`** and **`ai-response`** labels (Settings → Labels). The classification labels above are also worth creating as labels for filtering. `ai-response` is added whenever the bot sends a successful auto-reply (not an escalation).
 2. **Settings → Bots → Add Agent Bot**, with **Outgoing URL** `https://<your-domain>/chatwoot/agent-bot?secret=<CHATWOOT_AGENT_BOT_SECRET>` (omit `?secret=` if you didn't set the secret).
 3. Connect the bot to your support inbox (Inbox → Settings → Bot). New/reopened conversations now start in `pending`.
 4. **Keep the existing `message_created` webhook** (`/chatwoot`) connected — it still drafts for human-owned (`open`) conversations.
@@ -511,6 +513,7 @@ web/                         # Chatwoot Dashboard App (Vite + React + Tailwind +
 | `CLAUDE_RESPONDER_PROMPT` | No | Inline override for the AgentBot responder prompt. If unset, falls back to `src/config/responderPrompt.txt` |
 | `CHATWOOT_WEBHOOK_SECRET` | No | If set, the Chatwoot webhook URL must include `?secret=<value>` |
 | `CHATWOOT_AGENT_BOT_SECRET` | No | If set, the AgentBot webhook URL must include `?secret=<value>` |
+| `AGENT_BOT_HOLDING_REPLY` | No | `true`/`false` (default `true`). When `false`, escalations send no holding reply — the bot silently hands off to a human and generates a draft |
 | `DASHBOARD_APP_TOKEN` | No | Gates `/app` and `/app/api/*`. Pass as `?token=` in the Chatwoot Dashboard App URL. If unset, both are unprotected |
 | `DEBUG` | No | If truthy, posts the full Claude prompt as an additional private note (do not use in prod) |
 
