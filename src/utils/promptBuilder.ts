@@ -100,12 +100,35 @@ function buildOrderSection(orders: ShopifyOrder[]): string {
     const items = order.line_items
       ?.map((li) => `${li.title} x${li.quantity} (${li.price} ${order.currency})`)
       .join(', ') ?? 'No items';
-    const cancelled = order.cancelled_at ? ` [CANCELLED: ${order.cancel_reason ?? 'N/A'}]` : '';
 
-    return [
-      `Order ${order.name} | ${date} | ${order.total_price} ${order.currency} | ${financial} / ${fulfillment}${cancelled}`,
+    const fs = financial.toLowerCase();
+    const isRefunded = fs === 'refunded';
+    const isPartiallyRefunded = fs === 'partially_refunded';
+    const isVoided = fs === 'voided';
+    const isCancelled = Boolean(order.cancelled_at);
+    const isFulfilled = (order.fulfillment_status ?? '').toLowerCase() === 'fulfilled';
+
+    const flags: string[] = [];
+    if (isCancelled) flags.push(`CANCELLED: ${order.cancel_reason ?? 'N/A'}`);
+    if (isRefunded) flags.push('REFUNDED');
+    if (isPartiallyRefunded) flags.push('PARTIALLY REFUNDED');
+    if (isVoided) flags.push('VOIDED');
+    const flagStr = flags.length > 0 ? ` [${flags.join(' | ')}]` : '';
+
+    const orderLines = [
+      `Order ${order.name} | ${date} | ${order.total_price} ${order.currency} | ${financial} / ${fulfillment}${flagStr}`,
       `  Items: ${items}`,
-    ].join('\n');
+    ];
+
+    // Strong inline warning so neither the responder nor the draft tells the
+    // customer a refunded/cancelled order is "on its way".
+    if ((isRefunded || isCancelled || isVoided) && !isFulfilled) {
+      orderLines.push(
+        '  NOTE: This order was refunded/cancelled and never fulfilled. Do NOT tell the customer it is on its way or in transit.',
+      );
+    }
+
+    return orderLines.join('\n');
   });
 
   return `--- ORDER HISTORY ---\n${lines.join('\n---\n')}`;

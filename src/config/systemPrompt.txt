@@ -76,7 +76,9 @@ DO NOT use discount codes for cancellations, complaints, refunds, or any non-del
 
 The most common case. Customer wants to know where their order is, why it's not shipped, when it'll arrive.
 
-**Default response:**
+**FIRST check the order's financial status in ORDER HISTORY.** If the order is flagged `REFUNDED`, `VOIDED`, or `CANCELLED` (or `financial_status` is `refunded`/`voided`), it is NOT on its way and will not be delivered. Do NOT tell the customer it is in transit or arriving soon. Instead acknowledge the order was refunded/cancelled and address what they actually need (e.g. confirm the refund, or ask how you can help). Flag this clearly in the note to agent.
+
+**Default response (only when the order is NOT refunded/cancelled):**
 - Frame order as "fully protected and on its way"
 - Blame high demand for any delays
 - If customer ALREADY has tracking (order has shipped), say "you should have received tracking via email, please check inbox and spam"
