@@ -105,16 +105,83 @@ export async function sendReply(
 }
 
 /**
- * Marks a conversation as resolved via the toggle_status endpoint
- * (`POST /conversations/{id}/toggle_status` with `{ status: 'resolved' }`),
- * which is the standard accounts-API way to explicitly set conversation state.
+ * Sets a conversation's status via the toggle_status endpoint
+ * (`POST /conversations/{id}/toggle_status` with `{ status }`), the standard
+ * accounts-API way to explicitly move a conversation between states.
+ */
+export async function setConversationStatus(
+  conversationId: number,
+  status: 'open' | 'resolved' | 'pending',
+): Promise<void> {
+  await chatwootClient.post(
+    `/conversations/${conversationId}/toggle_status`,
+    { status },
+  );
+  logger.info('Set conversation status', { conversationId, status });
+}
+
+/**
+ * Marks a conversation as resolved.
  */
 export async function resolveConversation(
   conversationId: number,
 ): Promise<void> {
-  await chatwootClient.post(
-    `/conversations/${conversationId}/toggle_status`,
-    { status: 'resolved' },
-  );
-  logger.info('Resolved conversation', { conversationId });
+  await setConversationStatus(conversationId, 'resolved');
+}
+
+/**
+ * Returns the labels currently applied to a conversation
+ * (`GET /conversations/{id}/labels`). Returns an empty array on failure.
+ */
+export async function getConversationLabels(
+  conversationId: number,
+): Promise<string[]> {
+  try {
+    const res = await chatwootClient.get<{ payload: string[] }>(
+      `/conversations/${conversationId}/labels`,
+    );
+    return res.data.payload ?? [];
+  } catch (err) {
+    logger.warn('Failed to read conversation labels', {
+      conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+/**
+ * Adds labels to a conversation without removing existing ones. Chatwoot's
+ * `POST /conversations/{id}/labels` REPLACES the full label set, so we read the
+ * current labels, merge in the new ones (deduped), and write them all back.
+ * Returns the resulting label set. Best-effort: logs and returns the prior set
+ * on failure.
+ */
+export async function addConversationLabels(
+  conversationId: number,
+  labelsToAdd: string[],
+): Promise<string[]> {
+  const current = await getConversationLabels(conversationId);
+  const merged = Array.from(new Set([...current, ...labelsToAdd]));
+
+  // Nothing new to add — skip the write.
+  if (merged.length === current.length) return current;
+
+  try {
+    await chatwootClient.post(`/conversations/${conversationId}/labels`, {
+      labels: merged,
+    });
+    logger.info('Added conversation labels', {
+      conversationId,
+      added: labelsToAdd,
+    });
+    return merged;
+  } catch (err) {
+    logger.warn('Failed to add conversation labels', {
+      conversationId,
+      labelsToAdd,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return current;
+  }
 }

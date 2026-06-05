@@ -6,10 +6,13 @@ import {
   getConversationDetails,
   getContactConversations,
   postPrivateNote,
+  getConversationLabels,
+  addConversationLabels,
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
 import { resolveUnmatchedCustomer } from './customerResolver.js';
+import { classifyConversation } from './classifier.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
 import {
   gatherConversationsWithMessages,
@@ -251,38 +254,26 @@ export function formatDraftNote(draft: StructuredDraft): string {
   return draft.response;
 }
 
-export async function handleIncomingMessage(
-  payload: ChatwootWebhookPayload,
-): Promise<void> {
-  const conversationId = payload.conversation.id;
-  const contactId = payload.sender.id;
-  const contactEmail = payload.sender.email;
+/**
+ * Gathers the prompt context and runs the Shopify matcher agent when the
+ * contact isn't matched to an account with orders (and isn't already linked).
+ * Sets the "ask for order number / email" guidance when no order data is
+ * available. Shared by the AI-draft flow and the autonomous AgentBot responder.
+ */
+export async function gatherContextWithMatching(params: {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+}): Promise<{ context: PromptContext; lookup: DraftLookupMeta }> {
+  const { context: ctx, lookup } = await gatherDraftContext(params);
 
-  logger.info('Processing AI draft', { conversationId, contactId, contactEmail });
-
-  const systemPrompt = env.claudeSystemPrompt;
-  if (!systemPrompt) {
-    logger.warn('CLAUDE_SYSTEM_PROMPT is empty, skipping AI draft', { conversationId });
-    return;
-  }
-
-  const { context: ctx, lookup } = await gatherDraftContext({
-    conversationId,
-    contactId,
-    email: contactEmail,
-  });
-
-  // When the contact isn't matched to a Shopify account with orders — and a
-  // human hasn't already linked one — run the tool-using matcher agent. If the
-  // customer supplied an alternate email or order number it will find them,
-  // link the email for future lookups, and enrich the context here.
   if (!lookup.matched && !lookup.alreadyLinked) {
     logger.info('Contact unmatched — running Shopify matcher agent', {
-      conversationId,
-      contactId,
+      conversationId: params.conversationId,
+      contactId: params.contactId,
     });
     const resolved = await resolveUnmatchedCustomer({
-      contactId,
+      contactId: params.contactId,
       customerMessage: lookup.customerMessage,
       chatwootEmail: lookup.chatwootEmail,
       existingCustomAttributes: lookup.customAttributes,
@@ -295,6 +286,59 @@ export async function handleIncomingMessage(
   // Still no order data? Tell the AI to ask for an order number / email.
   if (ctx.orders.length === 0) {
     ctx.lookupGuidance = LOOKUP_GUIDANCE;
+  }
+
+  return { context: ctx, lookup };
+}
+
+/**
+ * Generates an AI draft for a conversation, posts it as a private note, stores
+ * it, and refreshes the customer summary. When `escalation` is true, a special
+ * "this was just auto-escalated to a human" block is added so the draft is the
+ * agent's substantive next reply. Used by both the draft webhook (open convos)
+ * and the AgentBot escalation path.
+ */
+export async function postAiDraft(params: {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+  escalation?: boolean;
+  // When true, also classify the conversation and merge labels (used on
+  // human-owned/open conversations, where the AgentBot doesn't run).
+  classify?: boolean;
+}): Promise<void> {
+  const { conversationId, contactId } = params;
+
+  const systemPrompt = env.claudeSystemPrompt;
+  if (!systemPrompt) {
+    logger.warn('CLAUDE_SYSTEM_PROMPT is empty, skipping AI draft', { conversationId });
+    return;
+  }
+
+  const { context: ctx } = await gatherContextWithMatching({
+    conversationId,
+    contactId,
+    email: params.email,
+  });
+
+  if (params.escalation) {
+    ctx.escalationContext = true;
+  }
+
+  // Maintain conversation labels on open conversations (best-effort).
+  if (params.classify) {
+    try {
+      const currentLabels = await getConversationLabels(conversationId);
+      const classified = await classifyConversation(ctx, currentLabels);
+      if (classified && classified.length > 0) {
+        await addConversationLabels(conversationId, classified);
+      }
+    } catch (err) {
+      logger.warn('Classification on open conversation failed', {
+        conversationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const userPrompt = buildPrompt(ctx);
@@ -313,7 +357,6 @@ export async function handleIncomingMessage(
     return;
   }
 
-  // Phase 5: Post as private note (response + optional note to agent) and store.
   await postPrivateNote(conversationId, formatDraftNote(draft));
   await storeDraft({
     conversationId,
@@ -326,9 +369,7 @@ export async function handleIncomingMessage(
   });
   logger.info('AI draft posted successfully', { conversationId });
 
-  // Phase 6: Refresh the stored customer AI summary (best-effort).
-  // The webhook has already responded 200, so this runs in the background and
-  // must never throw out of this function.
+  // Refresh the stored customer AI summary (best-effort).
   await generateCustomerSummarySafely({
     contactId,
     conversationId,
@@ -337,6 +378,18 @@ export async function handleIncomingMessage(
     customerName: ctx.customerName,
     orders: ctx.orders,
   });
+}
+
+export async function handleIncomingMessage(
+  payload: ChatwootWebhookPayload,
+): Promise<void> {
+  const conversationId = payload.conversation.id;
+  const contactId = payload.sender.id;
+  const contactEmail = payload.sender.email;
+
+  logger.info('Processing AI draft', { conversationId, contactId, contactEmail });
+
+  await postAiDraft({ conversationId, contactId, email: contactEmail });
 }
 
 /**

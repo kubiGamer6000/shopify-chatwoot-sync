@@ -22,6 +22,10 @@ export interface PromptContext {
   // order number). Tells the AI to ask for an order number / original email if
   // the request actually needs their order data.
   lookupGuidance?: string;
+  // Set when this draft is for a conversation the AI bot just auto-escalated to
+  // a human. The customer already received a brief holding reply; the draft
+  // should be the agent's substantive next reply.
+  escalationContext?: boolean;
 }
 
 export function buildPrompt(ctx: PromptContext): string {
@@ -34,6 +38,12 @@ export function buildPrompt(ctx: PromptContext): string {
   sections.push(buildTrackingSection(ctx.orders, ctx.trackingByNumber));
   sections.push(buildCurrentConversationSection(ctx.currentMessages, ctx.emailSubject));
   sections.push(buildPreviousConversationsSection(ctx.previousConversations, ctx.conversationId));
+
+  if (ctx.escalationContext) {
+    sections.push(
+      '--- JUST ESCALATED ---\nThis conversation was just auto-escalated from the AI bot to a human agent. The customer has already received a brief holding reply telling them a team member will be in touch shortly. Write the draft for the human agent\'s actual substantive next reply that resolves the customer\'s request (do not repeat the holding message).',
+    );
+  }
 
   if (ctx.lookupGuidance && ctx.lookupGuidance.trim()) {
     sections.push(`--- CUSTOMER NOT MATCHED ---\n${ctx.lookupGuidance.trim()}`);

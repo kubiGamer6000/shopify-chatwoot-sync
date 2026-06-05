@@ -62,7 +62,8 @@ A `17token` API key is sent on every request to `https://api.17track.net/track/v
 | `POST` | `/webhooks/customers` | HMAC | Shopify `customers/create` and `customers/update` events |
 | `POST` | `/webhooks/orders` | HMAC | Shopify `orders/create`, `orders/updated`, `orders/fulfilled`, `orders/partially_fulfilled` events |
 | `POST` | `/sync/customers` | Bearer token | Triggers a manual full sync of all Shopify customers |
-| `POST` | `/chatwoot` | Optional `?secret=` | Chatwoot webhook → triggers AI draft generation |
+| `POST` | `/chatwoot` | Optional `?secret=` | Chatwoot webhook → AI draft generation for **open** conversations (+ label classification) |
+| `POST` | `/chatwoot/agent-bot` | Optional `?secret=` | Chatwoot **AgentBot** webhook → autonomous responder for **pending** conversations |
 | `GET`  | `/app` | None (static) | Serves the embedded Dashboard App SPA (Customer 360) |
 | `GET`  | `/app/api/customer` | `x-app-token` | Aggregated customer profile (Shopify orders + Skio subscriptions + stored AI summary) |
 | `POST` | `/app/api/subscriptions/:id/cancel` | `x-app-token` | Cancels a Skio subscription |
@@ -241,6 +242,65 @@ If no match is found (no usable info in the message), the prompt gains a `--- CU
 
 ---
 
+## AI AgentBot Responder
+
+On top of the AI-draft system, an autonomous **Chatwoot AgentBot** can take first ownership of conversations: it classifies and labels them, **auto-responds** to the cases it can safely handle (subscription cancellation, order status), and **escalates everything else to a human**. It is enabled simply by attaching the bot to an inbox in Chatwoot (no feature flag), and disabled by detaching it.
+
+### Two webhooks, routed by status
+
+Both webhooks receive every `message_created` event, but each acts on a disjoint conversation status so they never double-handle a message:
+
+| Webhook | Endpoint | Handles | Behaviour |
+|---------|----------|---------|-----------|
+| AgentBot (new) | `POST /chatwoot/agent-bot` | `pending` (AI-owned) | classify → auto-respond or escalate |
+| Draft (existing) | `POST /chatwoot` | `open` (human-owned) | AI draft as a private note (+ maintains labels); **skips `pending`** |
+
+When the AgentBot is attached, Chatwoot starts new conversations in **`pending`**. When a customer replies to a **resolved** conversation, Chatwoot reopens it back to **`pending`**, so it re-enters the AgentBot flow and is re-classified/re-routed on every message.
+
+> **5-second timeout:** AgentBot webhooks must reply within ~5s or Chatwoot flips the conversation to `open` and posts a bot-error activity. Both routes ack `200` immediately and do all LLM work asynchronously.
+
+### Classification ([`src/services/classifier.ts`](src/services/classifier.ts))
+
+Every inbound message (on both paths) is classified by a cheap model (`CLAUDE_CLASSIFIER_MODEL`, default `claude-haiku-4-5`) using structured output. It assigns one or more of these **classification labels** only:
+
+`business`, `change-address`, `change-contact`, `sub-cancel`, `refund`, `discount-issue`, `missing-packs`, `no-country`, `not-delivered`, `order-status`, `product-defect`, `other`.
+
+Labels are **add-only**: the classifier merges new labels into the conversation via `POST /conversations/{id}/labels` (read current → union → write) and never removes any. **Action labels** (e.g. `refund-30/50/70/full`, `reshipped`, `changed-address`, `sub-cancelled`, `sub-cancelled-ai`) are reserved for agents/tools and are never AI-assignable.
+
+### Routing & escalation ([`src/services/aiResponder.ts`](src/services/aiResponder.ts))
+
+For a `pending` conversation the AgentBot:
+
+1. Builds full context and runs the same Shopify [matcher](#unmatched-contact-matching).
+2. Classifies + merges labels.
+3. **Hard-escalates** (no responder call) if classification fails, or if any merged classification label falls outside `{ sub-cancel, order-status, other }`. **Refund always escalates**, even combined with sub-cancel or order-status.
+4. Otherwise runs the **responder agent** (`CLAUDE_MODEL`, Sonnet, via the Anthropic SDK Tool Runner) with the autonomous system prompt [`src/config/responderPrompt.txt`](src/config/responderPrompt.txt). Its replies are sent **directly to the customer**, then the conversation is **resolved**.
+
+The responder agent has two tools:
+
+- **`escalate_to_human(reason, holding_reply)`** — always available. The agent writes a short, **context-aware** `holding_reply`; the tool sends it to the customer, sets the conversation to **`open`**, and triggers an **escalation draft** for the human agent.
+- **`cancel_subscription()`** — injected only when the `sub-cancel` label is present. Cancels the customer's active Skio subscription(s) by their linked email (`cancelActiveSubscriptionsByEmail`) and adds the **`sub-cancelled-ai`** label. The agent only uses it when the customer insists we cancel for them (or can't self-serve); by default it sends the self-service link instead.
+
+#### Contextual holding reply
+
+The escalation message is not a fixed string — it is lightly tailored to the conversation while keeping the same intent ("we need a bit of extra help; a team member will be in touch shortly"):
+
+- **Tool escalations:** the responder agent writes `holding_reply` directly.
+- **Hard-filter escalations** (no agent call): a small dedicated Haiku call crafts a brief contextual holding reply, with a fixed sentence as a fallback if it fails.
+
+#### Escalation also drafts for the human
+
+Whenever the bot escalates (hard filter or tool), it calls the draft generator with an `escalationContext` flag, adding a `--- JUST ESCALATED ---` block to the prompt so the human gets a ready substantive next reply as a private note. ([`postAiDraft`](src/services/aiDraft.ts) is shared by the draft webhook and the escalation path.)
+
+### Manual Chatwoot setup
+
+1. Create the **`sub-cancelled-ai`** label (Settings → Labels). The classification labels above are also worth creating as labels for filtering.
+2. **Settings → Bots → Add Agent Bot**, with **Outgoing URL** `https://<your-domain>/chatwoot/agent-bot?secret=<CHATWOOT_AGENT_BOT_SECRET>` (omit `?secret=` if you didn't set the secret).
+3. Connect the bot to your support inbox (Inbox → Settings → Bot). New/reopened conversations now start in `pending`.
+4. **Keep the existing `message_created` webhook** (`/chatwoot`) connected — it still drafts for human-owned (`open`) conversations.
+
+---
+
 ## Dashboard App (Customer 360)
 
 A [Chatwoot Dashboard App](https://www.chatwoot.com/docs/product/others/dashboard-apps/) is a web app embedded as an iframe in the agent's conversation view. This repo ships one — a **Customer 360** panel — built with React + Vite + Tailwind + shadcn/ui and served by the same Express server at **`/app`**.
@@ -368,7 +428,8 @@ All API clients handle rate limiting automatically:
 src/
 ├── config/
 │   ├── env.ts              # Environment variable validation and typed config
-│   └── systemPrompt.txt    # Default Claude system prompt (Scandi brand voice + rules)
+│   ├── systemPrompt.txt    # Default Claude system prompt (Scandi brand voice + rules)
+│   └── responderPrompt.txt # Autonomous AgentBot responder system prompt
 ├── middleware/
 │   ├── verifyShopifyWebhook.ts  # HMAC-SHA256 webhook verification
 │   ├── syncAuth.ts              # Bearer token auth for /sync routes
@@ -376,7 +437,8 @@ src/
 ├── routes/
 │   ├── webhooks.ts          # Shopify webhook handlers (customers, orders)
 │   ├── sync.ts              # Manual sync trigger endpoint
-│   ├── chatwootWebhook.ts   # Chatwoot webhook → triggers AI draft
+│   ├── chatwootWebhook.ts   # Chatwoot webhook → AI draft for open convos (+ classify)
+│   ├── agentBotWebhook.ts   # Chatwoot AgentBot webhook → autonomous responder (pending)
 │   └── dashboardApp.ts      # Dashboard App API (customer profile, cancel subscription)
 ├── middleware/
 │   └── appAuth.ts           # Shared-token auth for the Dashboard App API
@@ -387,9 +449,11 @@ src/
 │   ├── chatwootConversation.ts   # Conversation/message reads + private note writes
 │   ├── tracking.ts               # 17track register + gettrackinfo client
 │   ├── claude.ts                 # Anthropic Messages API wrapper
-│   ├── aiDraft.ts                # Orchestrator: webhook → context → Claude → private note
+│   ├── aiDraft.ts                # Orchestrator: webhook → context → Claude → private note (postAiDraft)
+│   ├── classifier.ts             # Haiku structured conversation classifier (labels)
+│   ├── aiResponder.ts            # AgentBot orchestrator: classify → respond (tools) or escalate
 │   ├── customerResolver.ts       # Tool-using agent that matches unmatched contacts via email/order#
-│   ├── skio.ts                   # Skio GraphQL client (subscriptions + cancel)
+│   ├── skio.ts                   # Skio GraphQL client (subscriptions + cancel, cancel-by-email)
 │   ├── customerProfile.ts        # Dashboard App aggregator: Shopify orders + Skio subs
 │   ├── firestore.ts              # Lazy firebase-admin init (AI summary + draft storage)
 │   ├── customerSummary.ts        # Generates + stores/reads the AI customer summary
@@ -442,8 +506,11 @@ web/                         # Chatwoot Dashboard App (Vite + React + Tailwind +
 | `SYNC_INTERVAL_HOURS` | No | Periodic sync interval in hours (default: `0` = disabled) |
 | `PORT` | No | Server port (default: `8080`) |
 | `CLAUDE_SYSTEM_PROMPT` | No | Inline override for the system prompt. If unset, falls back to `src/config/systemPrompt.txt` |
-| `CLAUDE_MODEL` | No | Anthropic model id (default: `claude-sonnet-4-20250514`) |
+| `CLAUDE_MODEL` | No | Anthropic model id for drafts + responder agent (default: `claude-sonnet-4-20250514`) |
+| `CLAUDE_CLASSIFIER_MODEL` | No | Cheaper model for the conversation classifier + holding replies (default: `claude-haiku-4-5`) |
+| `CLAUDE_RESPONDER_PROMPT` | No | Inline override for the AgentBot responder prompt. If unset, falls back to `src/config/responderPrompt.txt` |
 | `CHATWOOT_WEBHOOK_SECRET` | No | If set, the Chatwoot webhook URL must include `?secret=<value>` |
+| `CHATWOOT_AGENT_BOT_SECRET` | No | If set, the AgentBot webhook URL must include `?secret=<value>` |
 | `DASHBOARD_APP_TOKEN` | No | Gates `/app` and `/app/api/*`. Pass as `?token=` in the Chatwoot Dashboard App URL. If unset, both are unprotected |
 | `DEBUG` | No | If truthy, posts the full Claude prompt as an additional private note (do not use in prod) |
 

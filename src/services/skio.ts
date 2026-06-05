@@ -110,3 +110,61 @@ export async function cancelSubscription(subscriptionId: string): Promise<boolea
   logger.info('Skio cancelSubscription result', { subscriptionId, ok });
   return ok;
 }
+
+const ACTIVE_STATUSES = new Set(['ACTIVE', 'active']);
+
+export interface CancelByEmailResult {
+  // Number of active subscriptions found for the email.
+  activeFound: number;
+  // Number that were successfully cancelled.
+  cancelled: number;
+  // Product titles of the cancelled subscriptions (for the reply, if useful).
+  cancelledTitles: string[];
+}
+
+/**
+ * Finds a customer's active Skio subscriptions by email and cancels each one.
+ * Mirrors the dashboard's active-subscription definition (`status` is ACTIVE and
+ * not already cancelled). Used by the AI responder's `cancel_subscription` tool.
+ * Never throws — returns a result summary so the caller can decide what to say.
+ */
+export async function cancelActiveSubscriptionsByEmail(
+  email: string,
+): Promise<CancelByEmailResult> {
+  const result: CancelByEmailResult = {
+    activeFound: 0,
+    cancelled: 0,
+    cancelledTitles: [],
+  };
+
+  const subs = await getSubscriptionsByEmail(email);
+  const active = subs.filter(
+    (s) => ACTIVE_STATUSES.has(s.status) && !s.cancelledAt,
+  );
+  result.activeFound = active.length;
+
+  for (const sub of active) {
+    try {
+      const ok = await cancelSubscription(sub.id);
+      if (ok) {
+        result.cancelled += 1;
+        const title =
+          sub.SubscriptionLines?.[0]?.ProductVariant?.Product?.title ?? null;
+        if (title) result.cancelledTitles.push(title);
+      }
+    } catch (err) {
+      logger.warn('Failed to cancel a Skio subscription', {
+        subscriptionId: sub.id,
+        email,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  logger.info('Cancelled active subscriptions by email', {
+    email,
+    activeFound: result.activeFound,
+    cancelled: result.cancelled,
+  });
+  return result;
+}

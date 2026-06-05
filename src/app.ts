@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import webhookRoutes from './routes/webhooks.js';
 import syncRoutes from './routes/sync.js';
 import chatwootWebhookRoutes from './routes/chatwootWebhook.js';
+import agentBotWebhookRoutes from './routes/agentBotWebhook.js';
 import dashboardAppRoutes from './routes/dashboardApp.js';
 
 const app = express();
@@ -32,7 +33,11 @@ app.use('/webhooks', verifyShopifyWebhook, webhookRoutes);
 // Sync routes (protected by SYNC_API_KEY when set)
 app.use('/sync', syncAuth, syncRoutes);
 
-// Chatwoot webhook for AI draft auto-reply
+// Chatwoot AgentBot webhook (autonomous responder for pending conversations).
+// Mounted before the generic /chatwoot route. Inherits the 5mb JSON parser above.
+app.use('/chatwoot/agent-bot', agentBotWebhookRoutes);
+
+// Chatwoot webhook for AI draft auto-reply (human-owned / open conversations).
 app.use('/chatwoot', chatwootWebhookRoutes);
 
 // --- Chatwoot Dashboard App (Customer 360) ---

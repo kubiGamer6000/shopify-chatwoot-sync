@@ -65,3 +65,9 @@ services:
       - key: FIREBASE_BASE64_SERVICE_ACCOUNT
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      - key: CLAUDE_CLASSIFIER_MODEL
+        scope: RUN_AND_BUILD_TIME
+        value: "claude-haiku-4-5"
+      - key: CHATWOOT_AGENT_BOT_SECRET
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET

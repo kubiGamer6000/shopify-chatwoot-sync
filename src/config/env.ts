@@ -20,10 +20,10 @@ for (const key of required) {
   }
 }
 
-function loadSystemPrompt(): string {
+function loadPromptFile(fileName: string): string {
   try {
     // Works from both src/ (dev with tsx) and dist/ (production build)
-    const promptPath = resolve(__dirname, '..', '..', 'src', 'config', 'systemPrompt.txt');
+    const promptPath = resolve(__dirname, '..', '..', 'src', 'config', fileName);
     return readFileSync(promptPath, 'utf-8').trim();
   } catch {
     return '';
@@ -42,8 +42,15 @@ export const env = {
   syncIntervalHours: Number(process.env.SYNC_INTERVAL_HOURS) || 0,
   port: Number(process.env.PORT) || 8080,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
-  claudeSystemPrompt: process.env.CLAUDE_SYSTEM_PROMPT || loadSystemPrompt(),
+  claudeSystemPrompt: process.env.CLAUDE_SYSTEM_PROMPT || loadPromptFile('systemPrompt.txt'),
   claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
+  // Cheaper model for the per-message conversation classifier (labels/routing).
+  claudeClassifierModel: process.env.CLAUDE_CLASSIFIER_MODEL || 'claude-haiku-4-5',
+  // System prompt for the autonomous AgentBot responder (sent directly to customers).
+  responderSystemPrompt:
+    process.env.CLAUDE_RESPONDER_PROMPT || loadPromptFile('responderPrompt.txt'),
+  // Optional shared secret for the AgentBot webhook (?secret=... query param).
+  agentBotWebhookSecret: process.env.CHATWOOT_AGENT_BOT_SECRET || '',
   seventeentrackApiKey: process.env.SEVENTEENTRACK_API_KEY!,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET || '',
   skioApiKey: process.env.SKIO_API_KEY!,
