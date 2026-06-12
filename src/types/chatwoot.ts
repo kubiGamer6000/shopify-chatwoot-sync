@@ -50,7 +50,10 @@ export interface ChatwootMessage {
   account_id: number;
   inbox_id: number;
   conversation_id: number;
-  message_type: 0 | 1 | 2; // 0 = incoming, 1 = outgoing, 2 = template
+  // 0 = incoming (customer), 1 = outgoing (agent), 2 = activity (system events
+  // like "Scandi Gum added refund" when a label is applied — never AI input),
+  // 3 = template.
+  message_type: 0 | 1 | 2 | 3;
   created_at: number;
   updated_at: number;
   private: boolean;

@@ -27,6 +27,17 @@ const client = new Anthropic({ apiKey: env.anthropicApiKey });
 
 const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
 
+/**
+ * Labels eligible for the autonomous responder in **backfill** mode. Stricter
+ * than the live flow: only conversations whose routing labels are a non-empty
+ * subset of these are touched. Everything else (including `other`) is skipped
+ * entirely — no escalation, no holding reply, no draft, no status change.
+ */
+const RESPONDER_ONLY_LABELS = new Set<ClassificationLabel>([
+  'sub-cancel',
+  'order-status',
+]);
+
 function holdingFallback(name?: string): string {
   return [
     `Hi ${name || 'there'},`,
@@ -126,10 +137,18 @@ async function runResponderAgent(params: {
   email?: string | null;
   ctx: PromptContext;
   labels: ClassificationLabel[];
-}): Promise<void> {
-  const { conversationId, contactId, email, ctx, labels } = params;
+  // When true (backfill), the agent must not escalate: if it tries to (or fails
+  // to produce a reply), the conversation is left completely untouched — no
+  // holding reply, no draft, no status change. Returns 'skipped' in that case.
+  noEscalate?: boolean;
+}): Promise<'responded' | 'escalated' | 'skipped'> {
+  const { conversationId, contactId, email, ctx, labels, noEscalate } = params;
 
   if (!env.responderSystemPrompt) {
+    if (noEscalate) {
+      logger.warn('Responder prompt empty — skipping (no escalation)', { conversationId });
+      return 'skipped';
+    }
     logger.warn('Responder prompt empty — escalating instead', { conversationId });
     await hardEscalate({
       conversationId,
@@ -138,7 +157,7 @@ async function runResponderAgent(params: {
       ctx,
       reason: 'responder prompt not configured',
     });
-    return;
+    return 'escalated';
   }
 
   let escalated = false;
@@ -158,6 +177,15 @@ async function runResponderAgent(params: {
     }),
     run: async ({ reason, holding_reply }) => {
       escalated = true;
+      // Backfill skip mode: the agent wanted to escalate, but we leave the
+      // conversation completely untouched (no reply, no draft, no status change).
+      if (noEscalate) {
+        logger.info('Responder wanted to escalate — skipping (backfill, no escalation)', {
+          conversationId,
+          reason,
+        });
+        return 'Escalation is disabled in this run. Do NOT send any reply or message. You are done.';
+      }
       try {
         // Holding reply is optional (AGENT_BOT_HOLDING_REPLY). When disabled,
         // the bot stays silent and just hands the conversation to a human.
@@ -227,8 +255,8 @@ async function runResponderAgent(params: {
       messages: [{ role: 'user', content: buildPrompt(ctx) }],
     });
 
-    // The escalate tool already sent the holding reply + handed off.
-    if (escalated) return;
+    // The escalate tool fired. In backfill skip mode this means "leave untouched".
+    if (escalated) return noEscalate ? 'skipped' : 'escalated';
 
     const text = finalMessage.content
       .map((b) => (b.type === 'text' ? b.text : ''))
@@ -236,6 +264,10 @@ async function runResponderAgent(params: {
       .trim();
 
     if (!text) {
+      if (noEscalate) {
+        logger.warn('Responder produced no final reply — skipping (no escalation)', { conversationId });
+        return 'skipped';
+      }
       logger.warn('Responder produced no final reply — escalating', { conversationId });
       await hardEscalate({
         conversationId,
@@ -244,18 +276,20 @@ async function runResponderAgent(params: {
         ctx,
         reason: 'no final reply produced',
       });
-      return;
+      return 'escalated';
     }
 
     await sendReply(conversationId, formatResponderMessage(text));
     await addConversationLabels(conversationId, ['ai-response']);
     await resolveConversation(conversationId);
     logger.info('Responder replied and resolved conversation', { conversationId });
+    return 'responded';
   } catch (err) {
-    logger.error('Responder agent run failed — escalating', {
+    logger.error('Responder agent run failed', {
       conversationId,
       error: err instanceof Error ? err.message : String(err),
     });
+    if (noEscalate) return 'skipped';
     if (!escalated) {
       await hardEscalate({
         conversationId,
@@ -265,15 +299,144 @@ async function runResponderAgent(params: {
         reason: 'responder agent error',
       });
     }
+    return 'escalated';
   }
 }
 
+export type AgentBotAction =
+  | 'responded'
+  | 'escalated'
+  | 'skipped'
+  | 'would-respond'
+  | 'would-escalate'
+  | 'would-skip';
+
+export interface AgentBotRunResult {
+  conversationId: number;
+  classified: ClassificationLabel[] | null;
+  routingLabels: ClassificationLabel[];
+  action: AgentBotAction;
+}
+
 /**
- * Entry point for the AgentBot webhook. Runs on pending conversations: enriches
- * customer context (with Shopify matching), classifies + labels the
- * conversation, then either hard-escalates (label not auto-handleable or
- * classification failed) or runs the autonomous responder agent.
+ * Core AgentBot flow for a single conversation: enriches customer context (with
+ * Shopify matching), classifies + labels the conversation, then either
+ * hard-escalates (label not auto-handleable or classification failed) or runs
+ * the autonomous responder agent. Shared by the live webhook and the one-time
+ * backfill script.
  *
+ * When `dryRun` is true, NOTHING is mutated (no label writes, no replies, no
+ * status changes, no drafts) — it only classifies and reports the routing
+ * decision.
+ *
+ * When `backfill` is true, the flow NEVER escalates: only conversations whose
+ * routing labels are a non-empty subset of {sub-cancel, order-status} get a
+ * response; EVERYTHING else is skipped entirely (no holding reply, no draft, no
+ * status change). Used by the one-time backlog script.
+ */
+export async function processAgentBotConversation(
+  params: { conversationId: number; contactId: number; email?: string | null },
+  opts: { dryRun?: boolean; backfill?: boolean } = {},
+): Promise<AgentBotRunResult> {
+  const { conversationId, contactId, email } = params;
+  const dryRun = opts.dryRun ?? false;
+  const backfill = opts.backfill ?? false;
+
+  // 1. Context + Shopify matching.
+  const { context: ctx } = await gatherContextWithMatching({
+    conversationId,
+    contactId,
+    email,
+  });
+
+  // 2. Classify against current labels and merge (add-only). Skip writes on dry-run.
+  const currentLabels = await getConversationLabels(conversationId);
+  const classified = await classifyConversation(ctx, currentLabels);
+  if (!dryRun && classified && classified.length > 0) {
+    await addConversationLabels(conversationId, classified);
+  }
+
+  // 3. Routing: union of existing + new classification labels (action labels and
+  //    non-taxonomy labels are ignored for routing).
+  const routingLabels = Array.from(
+    new Set<string>([...currentLabels, ...(classified ?? [])]),
+  ).filter((l): l is ClassificationLabel => CLASSIFICATION_LABEL_SET.has(l));
+
+  if (backfill) {
+    // Strict: only auto-respond to clean sub-cancel / order-status tickets.
+    // Anything else (other, refund, mixed, classification failure) is skipped
+    // and left completely untouched.
+    const eligible =
+      classified !== null &&
+      routingLabels.length > 0 &&
+      routingLabels.every((l) => RESPONDER_ONLY_LABELS.has(l));
+
+    if (dryRun) {
+      return {
+        conversationId,
+        classified,
+        routingLabels,
+        action: eligible ? 'would-respond' : 'would-skip',
+      };
+    }
+
+    if (!eligible) {
+      return { conversationId, classified, routingLabels, action: 'skipped' };
+    }
+
+    const outcome = await runResponderAgent({
+      conversationId,
+      contactId,
+      email,
+      ctx,
+      labels: routingLabels,
+      noEscalate: true,
+    });
+    return { conversationId, classified, routingLabels, action: outcome };
+  }
+
+  // --- Live flow ---
+  // 4. Hard-escalate if classification failed, produced nothing usable, or any
+  //    label falls outside the auto-handleable set.
+  const mustEscalate =
+    classified === null ||
+    routingLabels.length === 0 ||
+    routingLabels.some((l) => !NON_ESCALATION_LABELS.has(l));
+
+  if (dryRun) {
+    return {
+      conversationId,
+      classified,
+      routingLabels,
+      action: mustEscalate ? 'would-escalate' : 'would-respond',
+    };
+  }
+
+  if (mustEscalate) {
+    await hardEscalate({
+      conversationId,
+      contactId,
+      email,
+      ctx,
+      reason: `labels=[${routingLabels.join(', ')}] classified=${classified === null ? 'failed' : 'ok'}`,
+    });
+    return { conversationId, classified, routingLabels, action: 'escalated' };
+  }
+
+  // 5. Eligible (subset of sub-cancel / order-status / other) → responder agent.
+  const outcome = await runResponderAgent({
+    conversationId,
+    contactId,
+    email,
+    ctx,
+    labels: routingLabels,
+  });
+
+  return { conversationId, classified, routingLabels, action: outcome };
+}
+
+/**
+ * Entry point for the AgentBot webhook. Runs on pending conversations.
  * Best-effort: must never throw (the webhook has already replied 200).
  */
 export async function handleAgentBotMessage(
@@ -288,52 +451,5 @@ export async function handleAgentBotMessage(
     contactId,
   });
 
-  // 1. Context + Shopify matching.
-  const { context: ctx } = await gatherContextWithMatching({
-    conversationId,
-    contactId,
-    email,
-  });
-
-  // 2. Classify against current labels and merge (add-only).
-  const currentLabels = await getConversationLabels(conversationId);
-  const classified = await classifyConversation(ctx, currentLabels);
-  if (classified && classified.length > 0) {
-    await addConversationLabels(conversationId, classified);
-  }
-
-  // 3. Routing: union of existing + new classification labels (action labels and
-  //    non-taxonomy labels are ignored for routing).
-  const routingLabels = Array.from(
-    new Set<string>([...currentLabels, ...(classified ?? [])]),
-  ).filter((l): l is ClassificationLabel =>
-    CLASSIFICATION_LABEL_SET.has(l),
-  );
-
-  // 4. Hard-escalate if classification failed, produced nothing usable, or any
-  //    label falls outside the auto-handleable set.
-  const mustEscalate =
-    classified === null ||
-    routingLabels.length === 0 ||
-    routingLabels.some((l) => !NON_ESCALATION_LABELS.has(l));
-
-  if (mustEscalate) {
-    await hardEscalate({
-      conversationId,
-      contactId,
-      email,
-      ctx,
-      reason: `labels=[${routingLabels.join(', ')}] classified=${classified === null ? 'failed' : 'ok'}`,
-    });
-    return;
-  }
-
-  // 5. Eligible (subset of sub-cancel / order-status / other) → responder agent.
-  await runResponderAgent({
-    conversationId,
-    contactId,
-    email,
-    ctx,
-    labels: routingLabels,
-  });
+  await processAgentBotConversation({ conversationId, contactId, email });
 }

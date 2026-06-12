@@ -294,6 +294,22 @@ On escalation, the bot can send the customer a brief holding message before hand
 
 Whenever the bot escalates (hard filter or tool), it calls the draft generator with an `escalationContext` flag, adding a `--- JUST ESCALATED ---` block to the prompt so the human gets a ready substantive next reply as a private note. ([`postAiDraft`](src/services/aiDraft.ts) is shared by the draft webhook and the escalation path.)
 
+### One-time backfill for existing open tickets
+
+If you have a backlog of `open` conversations from before the AgentBot existed, run the backfill script. It classifies + labels every open conversation, then **only** auto-responds + resolves conversations whose labels are a non-empty subset of `{sub-cancel, order-status}`. **Everything else is skipped entirely** — no holding reply, no escalation draft, no status change (it keeps any labels added during classification). If the responder itself decides a sub-cancel/order-status ticket actually needs a human, that ticket is skipped too (never escalated).
+
+```bash
+npm run backfill -- --test --dry-run   # preview the latest 10 (no changes)
+npm run backfill -- --test             # process the latest 10 for real
+npm run backfill -- --limit=50         # process the latest 50 for real
+npm run backfill                       # process ALL open (prompts to confirm)
+npm run backfill -- --yes              # process ALL open, skip the confirmation
+```
+
+- `--dry-run` makes **no** changes: it classifies and prints the routing decision (`would-respond` / `would-skip`) per conversation, then a summary tally.
+- Live runs send real replies and resolve tickets, so start with `--test --dry-run`, then `--test`, before a full run.
+- Only `open` conversations are touched (`pending` is owned by the live bot; `resolved` is left alone). The backfill **never escalates** and never drafts — skipped tickets are left exactly as they were.
+
 ### Manual Chatwoot setup
 
 1. Create the **`sub-cancelled-ai`** and **`ai-response`** labels (Settings → Labels). The classification labels above are also worth creating as labels for filtering. `ai-response` is added whenever the bot sends a successful auto-reply (not an escalation).

@@ -223,7 +223,9 @@ function buildConversationsSection(
   for (const convo of ordered) {
     const date = new Date(convo.createdAt * 1000).toISOString().split('T')[0];
     const visible = [...convo.messages]
-      .filter((m) => !m.private && m.content)
+      // Exclude activity messages (type 2, e.g. "added refund" label events) so
+      // the summary never mistakes them for real agent statements.
+      .filter((m) => !m.private && m.content && (m.message_type === 0 || m.message_type === 1))
       .sort((a, b) => a.created_at - b.created_at);
 
     if (visible.length === 0) continue;

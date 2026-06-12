@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import type {
@@ -20,6 +20,52 @@ const trackingClient = axios.create({
 // 17track error code returned when the account has no registration quota left.
 const QUOTA_EXHAUSTED_CODE = -18019908;
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1500;
+
+function extractErrorDetail(err: unknown): string {
+  if (err instanceof AxiosError && err.response) {
+    const data = err.response.data as Record<string, unknown> | undefined;
+    return `${err.response.status} ${JSON.stringify(data)}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * POST to 17track with retries on transient server/rate-limit errors (500, 503,
+ * 429). Their docs list 500 as "server error — try again later".
+ */
+async function postWithRetry<T>(
+  path: string,
+  body: unknown,
+  opts: { numbers?: string[] } = {},
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    try {
+      const res = await trackingClient.post<T>(path, body);
+      return res.data;
+    } catch (err) {
+      lastErr = err;
+      const status = err instanceof AxiosError ? err.response?.status : undefined;
+      const retryable = status === 500 || status === 503 || status === 429;
+      if (!retryable || attempt === MAX_RETRIES) break;
+
+      const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
+      logger.warn('17track transient error, retrying', {
+        path,
+        attempt: attempt + 1,
+        status,
+        numbers: opts.numbers,
+        delayMs,
+        detail: extractErrorDetail(err),
+      });
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 export interface QuotaInfo {
   quota_total: number;
   quota_used: number;
@@ -29,8 +75,11 @@ export interface QuotaInfo {
 export async function registerTrackings(
   items: RegisterTrackingItem[],
 ): Promise<TrackInfoResponse> {
-  const res = await trackingClient.post<TrackInfoResponse>('/register', items);
-  return res.data;
+  return postWithRetry<TrackInfoResponse>(
+    '/register',
+    items,
+    { numbers: items.map((i) => i.number) },
+  );
 }
 
 /** Returns the account's registration quota, or null if the call fails. */
@@ -52,8 +101,11 @@ export async function getQuota(): Promise<QuotaInfo | null> {
 export async function getTrackInfo(
   items: Array<{ number: string; carrier?: number }>,
 ): Promise<TrackInfoResponse> {
-  const res = await trackingClient.post<TrackInfoResponse>('/gettrackinfo', items);
-  return res.data;
+  return postWithRetry<TrackInfoResponse>(
+    '/gettrackinfo',
+    items,
+    { numbers: items.map((i) => i.number) },
+  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -107,25 +159,44 @@ export async function getTrackingStatus(
   trackingNumbers: string[],
 ): Promise<Map<string, TrackingSummary>> {
   const result = new Map<string, TrackingSummary>();
-  if (trackingNumbers.length === 0) return result;
+  const numbers = Array.from(
+    new Set(trackingNumbers.map((n) => n.trim()).filter(Boolean)),
+  );
+  if (numbers.length === 0) return result;
 
-  const items = trackingNumbers.map((n) => ({ number: n }));
+  const items = numbers.map((n) => ({ number: n }));
 
   let response: TrackInfoResponse;
   try {
     response = await getTrackInfo(items);
   } catch (err) {
     logger.warn('17track gettrackinfo failed', {
-      error: err instanceof Error ? err.message : String(err),
+      numbers,
+      detail: extractErrorDetail(err),
     });
     return result;
   }
 
-  for (const item of response.data.accepted) {
-    result.set(item.number, buildSummary(item));
+  if (!response?.data) {
+    logger.warn('17track gettrackinfo returned unexpected shape', {
+      numbers,
+      code: response?.code,
+    });
+    return result;
   }
 
-  const rejected = response.data.rejected;
+  for (const item of response.data.accepted ?? []) {
+    try {
+      result.set(item.number, buildSummary(item));
+    } catch (err) {
+      logger.warn('17track failed to parse accepted tracking item', {
+        number: item.number,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const rejected = response.data.rejected ?? [];
   if (rejected.length === 0) return result;
 
   // Numbers already known to 17track but not yet registered get registered now.
@@ -187,7 +258,8 @@ export async function getTrackingStatus(
     }
   } catch (err) {
     logger.warn('17track register+retry failed, skipping tracking data', {
-      error: err instanceof Error ? err.message : String(err),
+      numbers: toRegister.map((r) => r.number),
+      detail: extractErrorDetail(err),
     });
   }
 

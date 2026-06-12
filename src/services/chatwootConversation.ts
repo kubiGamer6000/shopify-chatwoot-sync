@@ -130,6 +130,26 @@ export async function resolveConversation(
 }
 
 /**
+ * Lists conversations for the account filtered by status, one page at a time
+ * (`GET /conversations?status=&assignee_type=&page=`). Chatwoot returns ~25 per
+ * page under `data.payload`. Returns the page's conversations (empty when past
+ * the last page).
+ */
+export async function listConversations(params: {
+  status?: 'open' | 'pending' | 'resolved' | 'snoozed' | 'all';
+  page?: number;
+  assigneeType?: 'me' | 'unassigned' | 'assigned' | 'all';
+} = {}): Promise<ChatwootConversation[]> {
+  const { status = 'open', page = 1, assigneeType = 'all' } = params;
+  const res = await chatwootClient.get<{
+    data: { meta: Record<string, number>; payload: ChatwootConversation[] };
+  }>(
+    `/conversations?status=${status}&assignee_type=${assigneeType}&page=${page}`,
+  );
+  return res.data.data?.payload ?? [];
+}
+
+/**
  * Returns the labels currently applied to a conversation
  * (`GET /conversations/{id}/labels`). Returns an empty array on failure.
  */

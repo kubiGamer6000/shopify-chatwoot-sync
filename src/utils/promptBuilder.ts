@@ -197,7 +197,11 @@ function buildCurrentConversationSection(messages: ChatwootMessage[], emailSubje
   const sorted = [...messages].sort((a, b) => a.created_at - b.created_at);
 
   const lines = sorted
-    .filter((m) => !m.private)
+    // Only real customer (0) / agent (1) messages. Activity messages (2, e.g.
+    // "Scandi Gum added refund" when a label is applied) must NOT reach the AI:
+    // they read like an agent statement and cause false claims (e.g. telling a
+    // customer their order was already refunded).
+    .filter((m) => !m.private && (m.message_type === 0 || m.message_type === 1))
     .map((m) => {
       const role = m.message_type === 0 ? 'CUSTOMER' : 'AGENT';
       const time = new Date(m.created_at * 1000).toISOString();
@@ -231,7 +235,8 @@ function buildPreviousConversationsSection(
 
     const msgs = convo.messages ?? [];
     const visibleMsgs = msgs
-      .filter((m) => !m.private)
+      // Exclude activity messages (type 2) — see buildCurrentConversationSection.
+      .filter((m) => !m.private && (m.message_type === 0 || m.message_type === 1))
       .sort((a, b) => a.created_at - b.created_at)
       .slice(0, 10);
 
