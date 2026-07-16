@@ -176,6 +176,7 @@ export interface AiDraftDTO {
   contactId: number | null;
   response: string;
   noteToAgent: string | null;
+  customerMessageTranslation: string | null;
   model: string;
   generatedAt: string;
   source: 'auto' | 'manual';
@@ -185,6 +186,7 @@ export interface AiDraftDTO {
 export interface GeneratedDraft {
   response: string;
   noteToAgent?: string;
+  customerMessageTranslation?: string;
 }
 
 export interface LastCustomerMessage {

@@ -1,6 +1,7 @@
 import * as React from 'react';
 import {
   ChevronDown,
+  Languages,
   Loader2,
   MessageSquareQuote,
   Send,
@@ -25,6 +26,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
   const [loading, setLoading] = React.useState(true);
   const [response, setResponse] = React.useState('');
   const [noteToAgent, setNoteToAgent] = React.useState<string | null>(null);
+  const [translation, setTranslation] = React.useState<string | null>(null);
   const [lastMsg, setLastMsg] = React.useState<LastCustomerMessage | null>(null);
   const [showLastMsg, setShowLastMsg] = React.useState(false);
   const [showNote, setShowNote] = React.useState(false);
@@ -41,6 +43,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
     setLoading(true);
     setResponse('');
     setNoteToAgent(null);
+    setTranslation(null);
     setLastMsg(null);
     setShowLastMsg(false);
     setShowNote(false);
@@ -51,6 +54,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
         if (res.draft) {
           setResponse(res.draft.response);
           setNoteToAgent(res.draft.noteToAgent);
+          setTranslation(res.draft.customerMessageTranslation);
         }
         setLastMsg(res.lastCustomerMessage);
       })
@@ -83,6 +87,7 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
       });
       setResponse(res.response);
       setNoteToAgent(res.noteToAgent ?? null);
+      setTranslation(res.customerMessageTranslation ?? null);
       setInstruction('');
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to generate');
@@ -198,6 +203,26 @@ export function ResponseComposer({ context }: { context: ResolvedContext }) {
                     {noteToAgent}
                   </p>
                 )}
+              </div>
+            )}
+
+            {/* Translation of a non-English customer message — always visible,
+                read-only, and clearly marked "not sent" so it can never be
+                pasted into the reply by mistake. */}
+            {translation && translation.trim() && (
+              <div className="border-info/40 bg-info/10 overflow-hidden rounded-lg border">
+                <div className="flex items-center gap-2 px-2.5 py-2">
+                  <Languages className="text-info size-3.5 shrink-0" />
+                  <span className="text-info text-xs font-semibold uppercase tracking-wide">
+                    Customer message (translated)
+                  </span>
+                  <span className="text-info/70 ml-auto text-[11px] font-medium">
+                    not sent
+                  </span>
+                </div>
+                <p className="text-foreground/80 border-info/30 max-h-40 overflow-y-auto border-t px-2.5 py-2 text-[13px] leading-relaxed whitespace-pre-wrap">
+                  {translation}
+                </p>
               </div>
             )}
 

@@ -13,7 +13,12 @@ import {
   sendReply,
   getLastCustomerMessage,
   resolveConversation,
+  addConversationLabels,
 } from '../services/chatwootConversation.js';
+
+// Label applied to a conversation when an agent cancels a subscription from the
+// dashboard (the human counterpart to the AI's `sub-cancelled-ai` label).
+const SUB_CANCELLED_LABEL = 'sub-cancelled';
 
 const router = Router();
 
@@ -225,13 +230,27 @@ router.post('/subscriptions/:id/cancel', async (req: Request, res: Response) => 
     return;
   }
 
+  const body = (req.body ?? {}) as { conversationId?: number | string };
+  const conversationId = body.conversationId ? Number(body.conversationId) : null;
+
   try {
     const ok = await cancelSubscription(subscriptionId);
     if (!ok) {
       res.status(502).json({ error: 'Skio did not confirm the cancellation' });
       return;
     }
-    res.json({ ok: true });
+
+    // Best-effort: tag the ticket so agents can filter cancellations. Never
+    // let a labelling failure fail the (already successful) cancellation.
+    let labelled = false;
+    if (conversationId && !Number.isNaN(conversationId)) {
+      const merged = await addConversationLabels(conversationId, [
+        SUB_CANCELLED_LABEL,
+      ]);
+      labelled = merged.includes(SUB_CANCELLED_LABEL);
+    }
+
+    res.json({ ok: true, labelled });
   } catch (err) {
     logger.error('Failed to cancel subscription', {
       subscriptionId,

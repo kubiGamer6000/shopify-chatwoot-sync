@@ -9,11 +9,16 @@ const client = new Anthropic({ apiKey: env.anthropicApiKey });
 const DraftSchema = z.object({
   response: z.string(),
   noteToAgent: z.string().optional(),
+  // English translation of the customer's message. Populated ONLY when the
+  // customer wrote in a non-English language. Kept strictly separate from
+  // `response` so it can never be sent to the customer.
+  customerMessageTranslation: z.string().optional(),
 });
 
 export interface StructuredDraft {
   response: string;
   noteToAgent?: string;
+  customerMessageTranslation?: string;
 }
 
 /**
@@ -100,9 +105,14 @@ export async function generateStructuredDraft(
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
       hasNote: Boolean(parsed.noteToAgent),
+      hasTranslation: Boolean(parsed.customerMessageTranslation),
     });
 
-    return { response: parsed.response, noteToAgent: parsed.noteToAgent };
+    return {
+      response: parsed.response,
+      noteToAgent: parsed.noteToAgent,
+      customerMessageTranslation: parsed.customerMessageTranslation,
+    };
   } catch (err) {
     logger.error('Claude structured draft API error', {
       error: err instanceof Error ? err.message : String(err),

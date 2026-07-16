@@ -45,6 +45,25 @@ export function countSubscriptionOrders(orders: ShopifyOrder[]): number {
   }).length;
 }
 
+/**
+ * Resolves a human-friendly country name for an address. Prefers Shopify's
+ * full `country` field (e.g. "Germany"), falling back to expanding the 2-letter
+ * `country_code` (e.g. "DE" -> "Germany") via Intl, and finally the raw code.
+ */
+function formatCountry(address: ShopifyAddress): string | undefined {
+  if (address.country?.trim()) return address.country.trim();
+  if (address.country_code?.trim()) {
+    const code = address.country_code.trim().toUpperCase();
+    try {
+      const display = new Intl.DisplayNames(["en"], { type: "region" });
+      return display.of(code) || code;
+    } catch {
+      return code;
+    }
+  }
+  return undefined;
+}
+
 export function formatAddress(address?: ShopifyAddress): string {
   if (!address) return "";
   const parts = [
@@ -53,7 +72,7 @@ export function formatAddress(address?: ShopifyAddress): string {
     address.city,
     address.province_code || address.province,
     address.zip,
-    address.country_code || address.country,
+    formatCountry(address),
   ].filter(Boolean);
   return parts.join(", ");
 }

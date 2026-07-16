@@ -29,10 +29,12 @@ import { useToast } from '@/components/Toast';
 export function SubscriptionsPanel({
   subscriptions,
   currency,
+  conversationId,
   onChanged,
 }: {
   subscriptions: SubscriptionDTO[];
   currency: string;
+  conversationId: number | null;
   onChanged: () => void;
 }) {
   if (subscriptions.length === 0) {
@@ -62,6 +64,7 @@ export function SubscriptionsPanel({
           key={sub.id}
           sub={sub}
           currency={currency}
+          conversationId={conversationId}
           onChanged={onChanged}
         />
       ))}
@@ -72,10 +75,12 @@ export function SubscriptionsPanel({
 function SubscriptionCard({
   sub,
   currency,
+  conversationId,
   onChanged,
 }: {
   sub: SubscriptionDTO;
   currency: string;
+  conversationId: number | null;
   onChanged: () => void;
 }) {
   const { notify } = useToast();
@@ -85,7 +90,7 @@ function SubscriptionCard({
   const handleCancel = async () => {
     setIsCancelling(true);
     try {
-      await cancelSubscription(sub.id);
+      await cancelSubscription(sub.id, conversationId);
       notify('success', 'Subscription cancelled.');
       setOpen(false);
       onChanged();

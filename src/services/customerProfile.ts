@@ -112,7 +112,7 @@ const SUBSCRIPTION_RECURRING_TAG = 'subscription recurring order';
 
 const ACTIVE_SKIO_STATUSES = new Set(['ACTIVE', 'active']);
 
-function classifySubscriptionOrder(order: ShopifyOrder): SubscriptionOrderType {
+export function classifySubscriptionOrder(order: ShopifyOrder): SubscriptionOrderType {
   if (!order.tags) return null;
   const tags = order.tags.toLowerCase().split(',').map((t) => t.trim());
   if (tags.includes(SUBSCRIPTION_FIRST_TAG)) return 'first';
@@ -124,7 +124,7 @@ function classifySubscriptionOrder(order: ShopifyOrder): SubscriptionOrderType {
  * Maps Shopify's per-order fulfillment status + per-shipment carrier status into
  * a single high-level delivery state for the UI.
  */
-function deriveDeliveryStatus(order: ShopifyOrder): DeliveryStatus {
+export function deriveDeliveryStatus(order: ShopifyOrder): DeliveryStatus {
   if (order.cancelled_at) return 'cancelled';
 
   const shipmentStatuses = (order.fulfillments ?? [])

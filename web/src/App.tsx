@@ -162,6 +162,7 @@ function Loaded({
           <SubscriptionsPanel
             subscriptions={profile.subscriptions}
             currency={profile.summary.currency}
+            conversationId={context.conversationId}
             onChanged={onChanged}
           />
         </TabsContent>

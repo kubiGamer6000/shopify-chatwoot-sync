@@ -244,14 +244,27 @@ async function applyResolution(
 }
 
 /**
- * Formats a structured draft for posting as a Chatwoot private note, preserving
- * the historical `[NOTE TO AGENT]` layout that agents are used to.
+ * Formats a structured draft for posting as a Chatwoot private note. The
+ * customer-message translation (when present) is shown ABOVE the reply, clearly
+ * separated so it is never mistaken for part of the sendable message, and the
+ * `[NOTE TO AGENT]` block (when present) stays below the reply as before.
  */
 export function formatDraftNote(draft: StructuredDraft): string {
-  if (draft.noteToAgent && draft.noteToAgent.trim()) {
-    return `${draft.response}\n\n---\n[NOTE TO AGENT]\n${draft.noteToAgent.trim()}`;
+  const sections: string[] = [];
+
+  const translation = draft.customerMessageTranslation?.trim();
+  if (translation) {
+    sections.push(`[CUSTOMER MESSAGE — TRANSLATED]\n${translation}`);
   }
-  return draft.response;
+
+  sections.push(draft.response);
+
+  const note = draft.noteToAgent?.trim();
+  if (note) {
+    sections.push(`[NOTE TO AGENT]\n${note}`);
+  }
+
+  return sections.join('\n\n---\n');
 }
 
 /**
@@ -363,6 +376,7 @@ export async function postAiDraft(params: {
     contactId,
     response: draft.response,
     noteToAgent: draft.noteToAgent ?? null,
+    customerMessageTranslation: draft.customerMessageTranslation ?? null,
     model: env.claudeModel,
     generatedAt: new Date().toISOString(),
     source: 'auto',
@@ -449,6 +463,7 @@ export async function generateResponse(params: {
     contactId: params.contactId,
     response: draft.response,
     noteToAgent: draft.noteToAgent ?? null,
+    customerMessageTranslation: draft.customerMessageTranslation ?? null,
     model: env.claudeModel,
     generatedAt: new Date().toISOString(),
     source: 'manual',

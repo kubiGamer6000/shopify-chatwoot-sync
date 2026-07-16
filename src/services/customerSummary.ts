@@ -7,6 +7,10 @@ import {
   getConversationMessages,
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
+import {
+  deriveDeliveryStatus,
+  classifySubscriptionOrder,
+} from './customerProfile.js';
 import { countSubscriptionOrders } from '../utils/formatters.js';
 import type { ChatwootMessage } from '../types/chatwoot.js';
 import type { ShopifyOrder } from '../types/index.js';
@@ -147,7 +151,7 @@ async function resolveOrders(
 const SUMMARY_SYSTEM_PROMPT = `You are an assistant that writes concise internal summaries of a customer for support agents at Scandi, an e-commerce gum brand. You receive the customer's profile, order history, and their full support conversation history.
 
 Produce an object with two fields:
-- "overview": 2-4 sentences. Who the customer is, total orders and lifetime value, subscription status, and the status of recent/relevant orders (e.g. shipped, delivered, delayed, cancelled). Call out anything notable (high-value, repeat issues, at-risk of churn).
+- "overview": 2-4 sentences. Who the customer is, total orders and lifetime value, subscription status, and the status of recent/relevant orders (e.g. shipped, delivered, delayed, cancelled). Each order line includes a "delivery:" field (the derived carrier state: unfulfilled/in_transit/out_for_delivery/delivered/failure/cancelled), an optional "sub:" tag (first/recurring subscription order), and tracking when shipped — use these for order status rather than guessing. Call out anything notable (high-value, repeat issues, at-risk of churn).
 - "history": an array with ONE entry per support conversation, ordered chronologically (oldest first). Each entry has:
   - "conversationId": the conversation's numeric id (from the "Conversation #<id>" header), or null if unknown.
   - "date": the conversation's start date as YYYY-MM-DD, or null.
@@ -202,16 +206,33 @@ function buildOrdersSection(orders: ShopifyOrder[]): string {
     const date = o.created_at?.split('T')[0] ?? 'N/A';
     const financial = o.financial_status ?? 'unknown';
     const fulfillment = o.fulfillment_status ?? 'unfulfilled';
+    // Derived carrier delivery state (in transit / out for delivery /
+    // delivered / failure), from the same logic the dashboard uses.
+    const delivery = deriveDeliveryStatus(o);
+    const subType = classifySubscriptionOrder(o);
+    const subTag = subType ? ` | sub: ${subType}` : '';
     const items =
       o.line_items?.map((li) => `${li.title} x${li.quantity}`).join(', ') ??
       'No items';
     const cancelled = o.cancelled_at
       ? ` [CANCELLED: ${o.cancel_reason ?? 'N/A'}]`
       : '';
-    return `${o.name} | ${date} | ${o.total_price} ${o.currency} | ${financial}/${fulfillment}${cancelled} | ${items}`;
+    // Tracking (carrier + number) when the order has shipped.
+    const tracking = buildTrackingLabel(o);
+    return `${o.name} | ${date} | ${o.total_price} ${o.currency} | ${financial}/${fulfillment} | delivery: ${delivery}${subTag}${cancelled} | ${items}${tracking}`;
   });
 
   return `--- ORDERS ---\n${lines.join('\n')}`;
+}
+
+function buildTrackingLabel(order: ShopifyOrder): string {
+  for (const f of order.fulfillments ?? []) {
+    const number = f.tracking_number || f.tracking_numbers?.[0];
+    if (!number) continue;
+    const company = f.tracking_company ? `${f.tracking_company} ` : '';
+    return ` | tracking: ${company}${number}`;
+  }
+  return '';
 }
 
 function buildConversationsSection(
