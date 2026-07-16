@@ -87,6 +87,11 @@ function SubscriptionCard({
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [open, setOpen] = React.useState(false);
 
+  // Each subscription is billed in its own currency (Skio `currencyCode`),
+  // which can differ from the customer's order currency. Fall back to the
+  // order currency only when Skio doesn't provide one.
+  const subCurrency = sub.currencyCode ?? currency;
+
   const handleCancel = async () => {
     setIsCancelling(true);
     try {
@@ -175,7 +180,7 @@ function SubscriptionCard({
               </span>
               {line.price != null && (
                 <span className="text-muted-foreground shrink-0">
-                  {formatMoney(line.price, currency)}
+                  {formatMoney(line.price, subCurrency)}
                 </span>
               )}
             </div>

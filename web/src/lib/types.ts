@@ -82,6 +82,7 @@ export interface SubscriptionDTO {
   platformId: string | null;
   status: string;
   statusContext: string | null;
+  currencyCode: string | null;
   isActive: boolean;
   createdAt: string;
   cancelledAt: string | null;

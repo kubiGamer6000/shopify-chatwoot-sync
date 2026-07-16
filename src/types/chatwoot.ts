@@ -44,9 +44,25 @@ export interface ChatwootWebhookPayload {
 // --- Chatwoot REST API Types ---
 // REST responses use INTEGER message_type and Unix timestamps.
 
+export interface ChatwootAttachment {
+  id: number;
+  message_id?: number;
+  // String enum in REST responses: image, audio, video, file, location, etc.
+  file_type: string;
+  account_id?: number;
+  extension?: string | null;
+  // Public URL of the file (note: performs a 301 redirect to the real blob).
+  data_url?: string;
+  thumb_url?: string;
+  file_size?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface ChatwootMessage {
   id: number;
   content: string | null;
+  attachments?: ChatwootAttachment[];
   account_id: number;
   inbox_id: number;
   conversation_id: number;

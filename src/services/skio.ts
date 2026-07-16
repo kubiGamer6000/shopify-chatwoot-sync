@@ -38,6 +38,7 @@ const SUBSCRIPTIONS_BY_EMAIL = `
       platformId
       status
       statusContext
+      currencyCode
       createdAt
       cancelledAt
       nextBillingDate

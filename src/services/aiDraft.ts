@@ -11,6 +11,7 @@ import {
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
+import { gatherCustomerImages, type CustomerImage } from './attachments.js';
 import { resolveUnmatchedCustomer } from './customerResolver.js';
 import { classifyConversation } from './classifier.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
@@ -268,6 +269,34 @@ export function formatDraftNote(draft: StructuredDraft): string {
 }
 
 /**
+ * Combines the text prompt with any customer image attachments into a Claude
+ * message `content`. Returns a plain string when there are no images (so
+ * nothing changes for the common case), or a multimodal content-block array
+ * (text + image blocks) when the customer attached images to their message.
+ */
+export function toUserContent(
+  text: string,
+  images: CustomerImage[],
+): string | Anthropic.ContentBlockParam[] {
+  if (images.length === 0) return text;
+
+  const blocks: Anthropic.ContentBlockParam[] = [
+    { type: 'text', text },
+    {
+      type: 'text',
+      text: `The customer attached ${images.length} image(s) to their message, shown below. Take them into account when writing your reply (e.g. a photo of a defect or a delivered parcel).`,
+    },
+  ];
+  for (const img of images) {
+    blocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+    });
+  }
+  return blocks;
+}
+
+/**
  * Gathers the prompt context and runs the Shopify matcher agent when the
  * contact isn't matched to an account with orders (and isn't already linked).
  * Sets the "ask for order number / email" guidance when no order data is
@@ -362,8 +391,18 @@ export async function postAiDraft(params: {
     logger.debug('Posted debug prompt to conversation', { conversationId });
   }
 
+  // Include any images the customer attached to their message(s) so the model
+  // can see them (e.g. a photo of a product defect). Best-effort.
+  const images = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
+  if (images.length > 0) {
+    logger.info('Attached customer images to draft prompt', {
+      conversationId,
+      imageCount: images.length,
+    });
+  }
+
   const draft = await generateStructuredDraft(systemPrompt, [
-    { role: 'user', content: userPrompt },
+    { role: 'user', content: toUserContent(userPrompt, images) },
   ]);
   if (!draft) {
     logger.warn('Claude returned no draft', { conversationId });
@@ -440,10 +479,14 @@ export async function generateResponse(params: {
     params.previousResponse && params.correction && params.correction.trim(),
   );
 
+  // Include customer image attachments (best-effort) so the composer's model
+  // can see them too.
+  const images = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
+
   let messages: Anthropic.MessageParam[];
   if (isRevision) {
     messages = [
-      { role: 'user', content: buildPrompt(ctx) },
+      { role: 'user', content: toUserContent(buildPrompt(ctx), images) },
       { role: 'assistant', content: params.previousResponse! },
       {
         role: 'user',
@@ -452,7 +495,7 @@ export async function generateResponse(params: {
     ];
   } else {
     ctx.agentInstruction = params.instruction ?? undefined;
-    messages = [{ role: 'user', content: buildPrompt(ctx) }];
+    messages = [{ role: 'user', content: toUserContent(buildPrompt(ctx), images) }];
   }
 
   const draft = await generateStructuredDraft(systemPrompt, messages);

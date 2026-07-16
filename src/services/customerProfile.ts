@@ -77,6 +77,9 @@ export interface SubscriptionDTO {
   platformId: string | null;
   status: string;
   statusContext: string | null;
+  // The subscription's own billing currency (ISO 4217), independent of the
+  // customer's order currency. Falls back to null when Skio doesn't provide it.
+  currencyCode: string | null;
   isActive: boolean;
   createdAt: string;
   cancelledAt: string | null;
@@ -218,6 +221,7 @@ function buildSubscriptionDTO(sub: SkioSubscription): SubscriptionDTO {
     platformId: sub.platformId,
     status: sub.status,
     statusContext: sub.statusContext,
+    currencyCode: sub.currencyCode ?? null,
     isActive: ACTIVE_SKIO_STATUSES.has(sub.status) && !sub.cancelledAt,
     createdAt: sub.createdAt,
     cancelledAt: sub.cancelledAt,

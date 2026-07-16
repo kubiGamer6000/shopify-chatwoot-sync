@@ -22,6 +22,8 @@ export interface SkioSubscription {
   platformId: string | null;
   status: string;
   statusContext: string | null;
+  // ISO 4217 currency the customer is billed in (e.g. "EUR", "SEK", "HUF").
+  currencyCode: string | null;
   createdAt: string;
   cancelledAt: string | null;
   nextBillingDate: string | null;
