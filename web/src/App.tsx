@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Inbox, KeyRound, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Inbox, KeyRound, Loader2, RefreshCw, SearchX } from 'lucide-react';
 import { useChatwootContext } from '@/lib/chatwoot';
 import { hasAppToken } from '@/lib/auth';
 import { fetchCustomerProfile } from '@/lib/api';
@@ -86,11 +86,6 @@ function Dashboard() {
     <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
       {context === null ? (
         <WaitingState />
-      ) : !shopifyCustomerId && !email ? (
-        <EmptyState
-          title="No customer linked"
-          message="This conversation has no contact email or Shopify customer ID yet."
-        />
       ) : loading ? (
         <LoadingState />
       ) : error ? (
@@ -102,10 +97,19 @@ function Dashboard() {
           onChanged={reload}
           onSummaryRefreshed={handleSummaryRefreshed}
         />
+      ) : context.conversationId != null || context.contactId != null ? (
+        // No Shopify/Skio match (or nothing linked yet), but there's still a
+        // conversation/contact — show a simplified panel so agents keep the AI
+        // summary of past conversations and the reply composer.
+        <SimplifiedView
+          profile={profile}
+          context={context}
+          onSummaryRefreshed={handleSummaryRefreshed}
+        />
       ) : (
         <EmptyState
-          title="No Shopify match"
-          message="We couldn't find this customer's orders or subscriptions in Shopify or Skio."
+          title="No customer linked"
+          message="This conversation has no contact email or Shopify customer ID yet."
         />
       )}
     </div>
@@ -135,7 +139,7 @@ function Loaded({
 
   return (
     <>
-      <ProfileHeader profile={profile} />
+      <ProfileHeader customer={profile.customer} />
       <SummaryRow profile={profile} />
 
       <CustomerSummary
@@ -167,6 +171,61 @@ function Loaded({
           />
         </TabsContent>
       </Tabs>
+
+      {context.conversationId && (
+        <div className="mt-2 border-t pt-5">
+          <ResponseComposer context={context} />
+        </div>
+      )}
+    </>
+  );
+}
+
+function SimplifiedView({
+  profile,
+  context,
+  onSummaryRefreshed,
+}: {
+  profile: CustomerProfile | null;
+  context: ResolvedContext;
+  onSummaryRefreshed: (summary: CustomerSummaryType) => void;
+}) {
+  const summaryContext: SummaryContext = {
+    contactId: context.contactId,
+    conversationId: context.conversationId,
+    email: context.email,
+    shopifyCustomerId: context.shopifyCustomerId,
+    customerName: context.contactName,
+  };
+
+  // Merge whatever we know: prefer the (partial) Shopify profile, fall back to
+  // the Chatwoot contact identity from the conversation context.
+  const customer = {
+    shopifyCustomerId: profile?.customer.shopifyCustomerId ?? null,
+    name: profile?.customer.name ?? context.contactName ?? null,
+    email: profile?.customer.email ?? context.email ?? null,
+    phone: profile?.customer.phone ?? null,
+    address: profile?.customer.address ?? null,
+    shopifyUrl: profile?.customer.shopifyUrl ?? null,
+  };
+
+  return (
+    <>
+      <ProfileHeader customer={customer} />
+
+      <div className="border-warning/40 bg-warning/10 text-warning-foreground/90 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm">
+        <SearchX className="mt-0.5 size-4 shrink-0" />
+        <span>
+          No Shopify or Skio match for this contact. Showing the AI summary of
+          past conversations and the reply composer only.
+        </span>
+      </div>
+
+      <CustomerSummary
+        summary={profile?.aiSummary ?? null}
+        context={summaryContext}
+        onRefreshed={onSummaryRefreshed}
+      />
 
       {context.conversationId && (
         <div className="mt-2 border-t pt-5">

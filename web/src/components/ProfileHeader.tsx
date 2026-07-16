@@ -2,8 +2,11 @@ import { ExternalLink, Mail, Phone, MapPin, User } from 'lucide-react';
 import type { CustomerProfile } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 
-export function ProfileHeader({ profile }: { profile: CustomerProfile }) {
-  const { customer } = profile;
+export function ProfileHeader({
+  customer,
+}: {
+  customer: CustomerProfile['customer'];
+}) {
   const name = customer.name || 'Unknown customer';
 
   return (
