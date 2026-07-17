@@ -3,8 +3,16 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import * as z from 'zod/v4';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { recordAiUsage } from './aiAudit.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
+
+/** Optional audit metadata callers can attach so token usage is attributable. */
+export interface AiCallMeta {
+  kind?: string;
+  conversationId?: number | null;
+  contactId?: number | null;
+}
 
 const DraftSchema = z.object({
   response: z.string(),
@@ -30,11 +38,12 @@ export async function generateStructured<T>(
   systemPrompt: string,
   userPrompt: string,
   schema: z.ZodType<T>,
-  opts: { maxTokens?: number; model?: string } = {},
+  opts: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
 ): Promise<T | null> {
+  const model = opts.model ?? env.claudeModel;
   try {
     const response = await client.messages.parse({
-      model: opts.model ?? env.claudeModel,
+      model,
       max_tokens: opts.maxTokens ?? 1500,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
@@ -58,6 +67,14 @@ export async function generateStructured<T>(
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
     });
+    void recordAiUsage({
+      kind: opts.meta?.kind ?? 'structured',
+      model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      conversationId: opts.meta?.conversationId ?? null,
+      contactId: opts.meta?.contactId ?? null,
+    });
 
     return parsed;
   } catch (err) {
@@ -77,11 +94,12 @@ export async function generateStructured<T>(
 export async function generateStructuredDraft(
   systemPrompt: string,
   messages: Anthropic.MessageParam[],
-  opts: { maxTokens?: number; model?: string } = {},
+  opts: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
 ): Promise<StructuredDraft | null> {
+  const model = opts.model ?? env.claudeModel;
   try {
     const response = await client.messages.parse({
-      model: opts.model ?? env.claudeModel,
+      model,
       max_tokens: opts.maxTokens ?? 2048,
       system: systemPrompt,
       messages,
@@ -106,6 +124,14 @@ export async function generateStructuredDraft(
       outputTokens: response.usage.output_tokens,
       hasNote: Boolean(parsed.noteToAgent),
       hasTranslation: Boolean(parsed.customerMessageTranslation),
+    });
+    void recordAiUsage({
+      kind: opts.meta?.kind ?? 'draft',
+      model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      conversationId: opts.meta?.conversationId ?? null,
+      contactId: opts.meta?.contactId ?? null,
     });
 
     return {
@@ -163,11 +189,12 @@ export async function generateDraft(
 export async function generateCompletion(
   systemPrompt: string,
   userPrompt: string,
-  options: { maxTokens?: number; model?: string } = {},
+  options: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
 ): Promise<string | null> {
+  const model = options.model ?? env.claudeModel;
   try {
     const response = await client.messages.create({
-      model: options.model ?? env.claudeModel,
+      model,
       max_tokens: options.maxTokens ?? 1500,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
@@ -184,6 +211,14 @@ export async function generateCompletion(
     logger.info('Claude completion generated', {
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+    });
+    void recordAiUsage({
+      kind: options.meta?.kind ?? 'completion',
+      model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      conversationId: options.meta?.conversationId ?? null,
+      contactId: options.meta?.contactId ?? null,
     });
 
     return textBlock.text;

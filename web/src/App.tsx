@@ -167,6 +167,7 @@ function Loaded({
             subscriptions={profile.subscriptions}
             currency={profile.summary.currency}
             conversationId={context.conversationId}
+            email={profile.customer.email}
             onChanged={onChanged}
           />
         </TabsContent>

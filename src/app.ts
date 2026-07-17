@@ -10,6 +10,7 @@ import syncRoutes from './routes/sync.js';
 import chatwootWebhookRoutes from './routes/chatwootWebhook.js';
 import agentBotWebhookRoutes from './routes/agentBotWebhook.js';
 import dashboardAppRoutes from './routes/dashboardApp.js';
+import adminApiRoutes from './routes/adminApi.js';
 
 const app = express();
 
@@ -67,6 +68,31 @@ function serveAppIndex(_req: Request, res: Response): void {
 // are public but contain no secrets; API calls still need the token header.
 app.get(['/app', '/app/'], dashboardAppCsp, appPageAuth, serveAppIndex);
 app.use('/app', dashboardAppCsp, express.static(webDist, { index: false }));
+
+// --- Admin Control Dashboard (standalone, Firebase-Auth gated) ---
+
+// Admin API. Each route enforces its own requireAuth/requireAdmin (via Firebase
+// ID token), so authorization is 100% server-side.
+app.use('/admin/api', adminApiRoutes);
+
+// The admin SPA is a separate Vite build (base "/admin/"). It must NOT be
+// iframable (unlike the Chatwoot dashboard app).
+function adminCsp(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  next();
+}
+
+const adminDist = path.resolve(__dirname, '..', 'admin-web', 'dist');
+
+function serveAdminIndex(_req: Request, res: Response): void {
+  res.sendFile(path.join(adminDist, 'index.html'));
+}
+
+// Static assets first, then a client-side-routing SPA fallback for any other
+// /admin path (e.g. /admin/settings). The /admin/api mount above is matched
+// earlier, so it is never caught by this fallback.
+app.use('/admin', adminCsp, express.static(adminDist, { index: false }));
+app.get(/^\/admin(?:\/.*)?$/, adminCsp, serveAdminIndex);
 
 // Global error handler
 app.use(errorHandler);

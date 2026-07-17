@@ -3,9 +3,13 @@ import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { postAiDraft } from '../services/aiDraft.js';
+import { claimOnce } from '../services/cache.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const router = Router();
+
+// Idempotency window for Chatwoot message-webhook redeliveries.
+const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 
 router.post('/', (req: Request, res: Response) => {
   res.status(200).json({ received: true });
@@ -42,12 +46,25 @@ router.post('/', (req: Request, res: Response) => {
     senderEmail: payload.sender.email,
   });
 
-  postAiDraft({
-    conversationId: payload.conversation.id,
-    contactId: payload.sender.id,
-    email: payload.sender.email,
-    classify: true,
-  }).catch((err) => {
+  void (async () => {
+    // Skip duplicate deliveries of the same message so we never post two drafts
+    // for one customer message (fail-open when no cache is configured).
+    const fresh = await claimOnce('wh-draft', String(payload.id), MESSAGE_DEDUPE_TTL_MS);
+    if (!fresh) {
+      logger.info('Duplicate draft webhook delivery, skipping', {
+        conversationId: payload.conversation.id,
+        messageId: payload.id,
+      });
+      return;
+    }
+
+    await postAiDraft({
+      conversationId: payload.conversation.id,
+      contactId: payload.sender.id,
+      email: payload.sender.email,
+      classify: true,
+    });
+  })().catch((err) => {
     logger.error('AI draft processing failed', {
       conversationId: payload.conversation.id,
       error: err instanceof Error ? err.message : String(err),

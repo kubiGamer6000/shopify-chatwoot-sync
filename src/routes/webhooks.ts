@@ -1,16 +1,42 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
-import { fetchCustomerOrders } from '../services/shopify.js';
+import { fetchCustomerOrders, invalidateCustomerCache } from '../services/shopify.js';
+import { invalidateSubscriptionsCache } from '../services/skio.js';
 import { upsertContact } from '../services/chatwoot.js';
 import { registerTrackings } from '../services/tracking.js';
+import { claimOnce } from '../services/cache.js';
 import { buildCustomAttributes, toE164 } from '../utils/formatters.js';
 import type { ShopifyCustomer, ShopifyOrder, ChatwootContactPayload } from '../types/index.js';
 
 const router = Router();
 
+// Idempotency window for Shopify webhook redeliveries (keyed by webhook id).
+const WEBHOOK_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+
 function parseBody(req: Request): unknown {
   return JSON.parse((req.body as Buffer).toString('utf8'));
+}
+
+/**
+ * Returns true if this delivery is a duplicate (already processed) and should be
+ * skipped. Uses Shopify's stable per-event `X-Shopify-Webhook-Id`. Fail-open:
+ * when the header is absent or the store has no cache, it always processes.
+ */
+async function isDuplicateDelivery(req: Request): Promise<boolean> {
+  const id = req.header('x-shopify-webhook-id');
+  if (!id) return false;
+  const fresh = await claimOnce('wh-shopify', id, WEBHOOK_DEDUPE_TTL_MS);
+  return !fresh;
+}
+
+/**
+ * Invalidates cached Shopify (and Skio) data for a customer so the next read
+ * reflects the change this webhook delivered.
+ */
+async function invalidateCustomerCaches(customer: ShopifyCustomer): Promise<void> {
+  await invalidateCustomerCache({ customerId: customer.id, email: customer.email });
+  if (customer.email) await invalidateSubscriptionsCache(customer.email);
 }
 
 async function syncCustomerToChatwoot(customer: ShopifyCustomer): Promise<void> {
@@ -18,6 +44,10 @@ async function syncCustomerToChatwoot(customer: ShopifyCustomer): Promise<void> 
     logger.warn('Webhook customer has no id, skipping');
     return;
   }
+
+  // Refresh caches BEFORE fetching orders so the fetch below repopulates them
+  // with fresh data (and the dashboard/AI see the update immediately).
+  await invalidateCustomerCaches(customer);
 
   const orders = await fetchCustomerOrders(customer.id);
   const customAttrs = buildCustomAttributes(customer, orders);
@@ -36,6 +66,11 @@ async function syncCustomerToChatwoot(customer: ShopifyCustomer): Promise<void> 
 // --- Customer Created / Updated ---
 router.post('/customers', async (req: Request, res: Response) => {
   try {
+    if (await isDuplicateDelivery(req)) {
+      logger.info('Duplicate customer webhook delivery, skipping');
+      res.status(200).send('Duplicate, skipped');
+      return;
+    }
     const customer = parseBody(req) as ShopifyCustomer;
     logger.info('Received customer webhook', { customerId: customer.id });
     await syncCustomerToChatwoot(customer);
@@ -53,6 +88,11 @@ router.post('/customers', async (req: Request, res: Response) => {
 // fulfillments array with tracking numbers and URLs.
 router.post('/orders', async (req: Request, res: Response) => {
   try {
+    if (await isDuplicateDelivery(req)) {
+      logger.info('Duplicate order webhook delivery, skipping');
+      res.status(200).send('Duplicate, skipped');
+      return;
+    }
     const order = parseBody(req) as ShopifyOrder;
     logger.info('Received order webhook', { orderId: order.id, orderName: order.name });
 

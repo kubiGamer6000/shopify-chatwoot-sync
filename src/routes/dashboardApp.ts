@@ -2,7 +2,8 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
 import { getCustomerProfile } from '../services/customerProfile.js';
-import { cancelSubscription } from '../services/skio.js';
+import { cancelSubscription, invalidateSubscriptionsCache } from '../services/skio.js';
+import { recordSentReply } from '../services/aiAudit.js';
 import {
   getStoredSummary,
   refreshSummaryForContact,
@@ -198,6 +199,7 @@ router.post('/draft/send', async (req: Request, res: Response) => {
     // Sending the reply is the critical step. Resolving is best-effort so a
     // resolve failure never loses the agent's message.
     await sendReply(conversationId, message);
+    void recordSentReply({ conversationId, message, source: 'dashboard' });
 
     let resolved = false;
     if (shouldResolve) {
@@ -230,8 +232,12 @@ router.post('/subscriptions/:id/cancel', async (req: Request, res: Response) => 
     return;
   }
 
-  const body = (req.body ?? {}) as { conversationId?: number | string };
+  const body = (req.body ?? {}) as {
+    conversationId?: number | string;
+    email?: string;
+  };
   const conversationId = body.conversationId ? Number(body.conversationId) : null;
+  const email = typeof body.email === 'string' ? body.email : null;
 
   try {
     const ok = await cancelSubscription(subscriptionId);
@@ -239,6 +245,10 @@ router.post('/subscriptions/:id/cancel', async (req: Request, res: Response) => 
       res.status(502).json({ error: 'Skio did not confirm the cancellation' });
       return;
     }
+
+    // Invalidate the cached subscriptions so the panel reload shows the
+    // cancellation immediately (best-effort).
+    if (email) await invalidateSubscriptionsCache(email);
 
     // Best-effort: tag the ticket so agents can filter cancellations. Never
     // let a labelling failure fail the (already successful) cancellation.

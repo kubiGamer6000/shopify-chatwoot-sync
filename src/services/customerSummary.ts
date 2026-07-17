@@ -2,6 +2,7 @@ import * as z from 'zod/v4';
 import { logger } from '../utils/logger.js';
 import { getDb } from './firestore.js';
 import { generateStructured } from './claude.js';
+import { getAiConfig } from './appConfig.js';
 import {
   getContactConversations,
   getConversationMessages,
@@ -30,7 +31,6 @@ const SummarySchema = z.object({
 
 const COLLECTION = 'customerSummaries';
 const MAX_CONVERSATIONS = 15;
-const SUMMARY_MODEL = 'claude-haiku-4-5';
 
 interface ConversationWithMessages {
   id: number;
@@ -148,22 +148,6 @@ async function resolveOrders(
 
 // --- Prompt building ---
 
-const SUMMARY_SYSTEM_PROMPT = `You are an assistant that writes concise internal summaries of a customer for support agents at Scandi, an e-commerce gum brand. You receive the customer's profile, order history, and their full support conversation history.
-
-Produce an object with two fields:
-- "overview": 2-4 sentences. Who the customer is, total orders and lifetime value, subscription status, and the status of recent/relevant orders (e.g. shipped, delivered, delayed, cancelled). Each order line includes a "delivery:" field (the derived carrier state: unfulfilled/in_transit/out_for_delivery/delivered/failure/cancelled), an optional "sub:" tag (first/recurring subscription order), and tracking when shipped — use these for order status rather than guessing. Call out anything notable (high-value, repeat issues, at-risk of churn).
-- "history": an array with ONE entry per support conversation, ordered chronologically (oldest first). Each entry has:
-  - "conversationId": the conversation's numeric id (from the "Conversation #<id>" header), or null if unknown.
-  - "date": the conversation's start date as YYYY-MM-DD, or null.
-  - "status": the conversation status (e.g. "resolved", "open"), or null.
-  - "summary": a concise but detailed recap of THAT conversation only — the problem or request, what the agent actually did, anything the agent promised, and the resolution/current status. Be specific: reference order numbers, amounts, and discount codes when present. Do NOT repeat the conversation id/date/status inside this text (they are separate fields).
-  If there is no support history, return an empty array.
-
-Rules:
-- Be factual. Never invent details that are not in the provided context.
-- Only summarize real customer messages and real sent agent replies. Ignore internal private notes / AI draft suggestions entirely.
-- Write in English even if the conversation is in another language.`;
-
 function buildSummaryUserPrompt(input: SummaryInput): string {
   const sections: string[] = [];
 
@@ -277,12 +261,21 @@ function buildConversationsSection(
 export async function generateAndStoreSummary(
   input: SummaryInput,
 ): Promise<CustomerSummary | null> {
+  const cfg = await getAiConfig();
   const userPrompt = buildSummaryUserPrompt(input);
   const parsed = await generateStructured(
-    SUMMARY_SYSTEM_PROMPT,
+    cfg.summarySystemPrompt,
     userPrompt,
     SummarySchema,
-    { model: SUMMARY_MODEL, maxTokens: 1500 },
+    {
+      model: cfg.summaryModel,
+      maxTokens: cfg.summaryMaxTokens,
+      meta: {
+        kind: 'summary',
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+      },
+    },
   );
   if (!parsed) {
     logger.warn('Summary generation returned no content', {
@@ -298,7 +291,7 @@ export async function generateAndStoreSummary(
     conversationId: input.conversationId ?? null,
     overview: parsed.overview,
     history: parsed.history,
-    model: SUMMARY_MODEL,
+    model: cfg.summaryModel,
     generatedAt: new Date().toISOString(),
   };
 

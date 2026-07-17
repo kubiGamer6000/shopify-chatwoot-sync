@@ -30,11 +30,13 @@ export function SubscriptionsPanel({
   subscriptions,
   currency,
   conversationId,
+  email,
   onChanged,
 }: {
   subscriptions: SubscriptionDTO[];
   currency: string;
   conversationId: number | null;
+  email: string | null;
   onChanged: () => void;
 }) {
   if (subscriptions.length === 0) {
@@ -65,6 +67,7 @@ export function SubscriptionsPanel({
           sub={sub}
           currency={currency}
           conversationId={conversationId}
+          email={email}
           onChanged={onChanged}
         />
       ))}
@@ -76,11 +79,13 @@ function SubscriptionCard({
   sub,
   currency,
   conversationId,
+  email,
   onChanged,
 }: {
   sub: SubscriptionDTO;
   currency: string;
   conversationId: number | null;
+  email: string | null;
   onChanged: () => void;
 }) {
   const { notify } = useToast();
@@ -95,7 +100,7 @@ function SubscriptionCard({
   const handleCancel = async () => {
     setIsCancelling(true);
     try {
-      await cancelSubscription(sub.id, conversationId);
+      await cancelSubscription(sub.id, conversationId, email);
       notify('success', 'Subscription cancelled.');
       setOpen(false);
       onChanged();

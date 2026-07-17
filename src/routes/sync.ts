@@ -12,7 +12,9 @@ router.post('/customers', async (_req: Request, res: Response) => {
 
   res.status(202).json({ message: 'Sync started' });
 
-  void runFullSync();
+  // A manual trigger performs a complete scan (ignores the incremental
+  // watermark) so operators can force a full reconciliation on demand.
+  void runFullSync({ full: true });
 });
 
 export default router;

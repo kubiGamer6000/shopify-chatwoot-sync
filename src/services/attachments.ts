@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
+import { env } from '../config/env.js';
 import type { ChatwootMessage } from '../types/chatwoot.js';
 
 export type SupportedMediaType =
@@ -44,6 +45,50 @@ function normalizeMediaType(raw: string | undefined): SupportedMediaType | null 
     : null;
 }
 
+let chatwootHost: string | null | undefined;
+function getChatwootHost(): string | null {
+  if (chatwootHost !== undefined) return chatwootHost;
+  try {
+    chatwootHost = new URL(env.chatwootBaseUrl).host;
+  } catch {
+    chatwootHost = null;
+  }
+  return chatwootHost;
+}
+
+/**
+ * Extracts inline image URLs embedded in an incoming email's HTML body. Email
+ * clients embed customer photos inline (rather than as separate attachments),
+ * and Chatwoot rewrites those into same-host active_storage blob URLs. We only
+ * keep those same-host active_storage URLs so signature logos / tracking pixels
+ * (hotlinked from external hosts) are ignored.
+ */
+function extractInlineEmailImageUrls(message: ChatwootMessage): string[] {
+  const ca = message.content_attributes as
+    | { email?: { html_content?: { full?: unknown } } }
+    | undefined;
+  const html = ca?.email?.html_content?.full;
+  if (typeof html !== 'string' || !html) return [];
+
+  const host = getChatwootHost();
+  const urls: string[] = [];
+  const imgRegex = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = imgRegex.exec(html)) !== null) {
+    const raw = match[1]?.trim();
+    if (!raw || raw.startsWith('data:') || raw.startsWith('cid:')) continue;
+    try {
+      const parsed = new URL(raw);
+      if (host && parsed.host !== host) continue;
+      if (!parsed.pathname.includes('/rails/active_storage/')) continue;
+      urls.push(raw);
+    } catch {
+      // Not an absolute URL — skip.
+    }
+  }
+  return urls;
+}
+
 /**
  * Collects image attachments the customer sent in the current conversation and
  * downloads them as base64 so they can be passed to Claude as image content
@@ -59,17 +104,32 @@ export async function gatherCustomerImages(
   const seen = new Set<string>();
   const sorted = [...messages].sort((a, b) => a.created_at - b.created_at);
 
+  const pushUrl = (url: string | undefined | null): boolean => {
+    if (!url || seen.has(url)) return urls.length < MAX_IMAGES;
+    seen.add(url);
+    urls.push(url);
+    return urls.length < MAX_IMAGES;
+  };
+
   for (const m of sorted) {
     if (m.private || m.message_type !== 0) continue;
+
+    let room = true;
     for (const att of m.attachments ?? []) {
       const isImage =
         att.file_type === 'image' || (att.file_type as unknown) === 0;
-      if (!isImage || !att.data_url || seen.has(att.data_url)) continue;
-      seen.add(att.data_url);
-      urls.push(att.data_url);
-      if (urls.length >= MAX_IMAGES) break;
+      if (!isImage || !att.data_url) continue;
+      room = pushUrl(att.data_url);
+      if (!room) break;
     }
-    if (urls.length >= MAX_IMAGES) break;
+    if (!room) break;
+
+    // Email channel: images arrive inline in the HTML body, not as attachments.
+    for (const url of extractInlineEmailImageUrls(m)) {
+      room = pushUrl(url);
+      if (!room) break;
+    }
+    if (!room) break;
   }
 
   if (urls.length === 0) return [];

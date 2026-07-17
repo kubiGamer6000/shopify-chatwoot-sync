@@ -1,7 +1,22 @@
 import axios from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { cached, cacheDelete } from './cache.js';
 import type { SkioSubscription, SkioGraphQLResponse } from '../types/skio.js';
+
+const SUBS_CACHE_NS = 'skioSubs';
+// Short TTL as a backstop; cancellations invalidate the cache explicitly.
+const SUBS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function subsCacheKey(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/** Drops the cached subscriptions for an email (called after a cancellation). */
+export async function invalidateSubscriptionsCache(email: string): Promise<void> {
+  if (!email || !email.trim()) return;
+  await cacheDelete(SUBS_CACHE_NS, subsCacheKey(email));
+}
 
 const SKIO_API_URL = 'https://graphql.skio.com/v1/graphql';
 
@@ -66,13 +81,13 @@ export async function getSubscriptionsByEmail(
   email: string,
 ): Promise<SkioSubscription[]> {
   try {
-    const data = await skioQuery<{ Subscriptions: SkioSubscription[] }>(
-      SUBSCRIPTIONS_BY_EMAIL,
-      { email },
+    // The read-through cache only memoises successful fetches: `fetchLive`
+    // throws on error, so a transient Skio failure is never cached (and this
+    // function still resolves to [] to preserve the previous never-throw
+    // contract callers rely on).
+    return await cached(SUBS_CACHE_NS, subsCacheKey(email), SUBS_CACHE_TTL_MS, () =>
+      fetchSubscriptionsLive(email),
     );
-    const subs = data.Subscriptions ?? [];
-    logger.debug(`Fetched ${subs.length} Skio subscriptions`, { email });
-    return subs;
   } catch (err) {
     logger.warn('Failed to fetch Skio subscriptions', {
       email,
@@ -80,6 +95,18 @@ export async function getSubscriptionsByEmail(
     });
     return [];
   }
+}
+
+async function fetchSubscriptionsLive(
+  email: string,
+): Promise<SkioSubscription[]> {
+  const data = await skioQuery<{ Subscriptions: SkioSubscription[] }>(
+    SUBSCRIPTIONS_BY_EMAIL,
+    { email },
+  );
+  const subs = data.Subscriptions ?? [];
+  logger.debug(`Fetched ${subs.length} Skio subscriptions`, { email });
+  return subs;
 }
 
 const CANCEL_SUBSCRIPTION = `
@@ -161,6 +188,9 @@ export async function cancelActiveSubscriptionsByEmail(
       });
     }
   }
+
+  // Reflect the cancellation immediately on the next read.
+  if (result.cancelled > 0) await invalidateSubscriptionsCache(email);
 
   logger.info('Cancelled active subscriptions by email', {
     email,

@@ -61,4 +61,10 @@ export const env = {
   skioApiKey: process.env.SKIO_API_KEY!,
   dashboardAppToken: process.env.DASHBOARD_APP_TOKEN || '',
   firebaseServiceAccountBase64: process.env.FIREBASE_BASE64_SERVICE_ACCOUNT || '',
+  // Comma-separated Google account emails that are always admins in the Admin
+  // Control Dashboard. Bootstraps the first admin; they can then approve others.
+  adminBootstrapEmails: (process.env.ADMIN_BOOTSTRAP_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean),
 };

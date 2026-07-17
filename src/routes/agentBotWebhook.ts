@@ -3,9 +3,13 @@ import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { handleAgentBotMessage } from '../services/aiResponder.js';
+import { claimOnce } from '../services/cache.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const router = Router();
+
+// Idempotency window for AgentBot message-webhook redeliveries.
+const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Chatwoot AgentBot webhook. Connected to the inbox via Settings -> Bots, this
@@ -45,7 +49,20 @@ router.post('/', (req: Request, res: Response) => {
     senderEmail: payload.sender.email,
   });
 
-  handleAgentBotMessage(payload).catch((err) => {
+  void (async () => {
+    // Skip duplicate deliveries so the bot never answers the same message twice
+    // (fail-open when no cache is configured).
+    const fresh = await claimOnce('wh-agentbot', String(payload.id), MESSAGE_DEDUPE_TTL_MS);
+    if (!fresh) {
+      logger.info('Duplicate AgentBot webhook delivery, skipping', {
+        conversationId: payload.conversation.id,
+        messageId: payload.id,
+      });
+      return;
+    }
+
+    await handleAgentBotMessage(payload);
+  })().catch((err) => {
     logger.error('AgentBot processing failed', {
       conversationId: payload.conversation.id,
       error: err instanceof Error ? err.message : String(err),

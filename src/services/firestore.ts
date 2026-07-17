@@ -3,21 +3,23 @@ import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 
+let app: App | null = null;
 let db: Firestore | null = null;
 let initAttempted = false;
 
 /**
- * Lazily initializes Firestore from the base64-encoded service account.
- * Returns null (and logs once) if the credential is missing or invalid, so
- * callers can degrade gracefully instead of crashing the server.
+ * Lazily initializes the firebase-admin App from the base64-encoded service
+ * account. Returns null (and logs once) if the credential is missing/invalid,
+ * so callers can degrade gracefully instead of crashing the server. Shared by
+ * Firestore and Firebase Auth (admin token verification).
  */
-export function getDb(): Firestore | null {
-  if (db) return db;
-  if (initAttempted) return db;
+export function getFirebaseApp(): App | null {
+  if (app) return app;
+  if (initAttempted) return app;
   initAttempted = true;
 
   if (!env.firebaseServiceAccountBase64) {
-    logger.warn('FIREBASE_BASE64_SERVICE_ACCOUNT not set — Firestore disabled');
+    logger.warn('FIREBASE_BASE64_SERVICE_ACCOUNT not set — Firestore/Auth disabled');
     return null;
   }
 
@@ -32,7 +34,7 @@ export function getDb(): Firestore | null {
       private_key: string;
     };
 
-    const app: App =
+    app =
       getApps()[0] ??
       initializeApp({
         credential: cert({
@@ -42,8 +44,34 @@ export function getDb(): Firestore | null {
         }),
       });
 
-    db = getFirestore(app);
-    logger.info('Firestore initialized', { projectId: serviceAccount.project_id });
+    logger.info('Firebase initialized', { projectId: serviceAccount.project_id });
+    return app;
+  } catch (err) {
+    logger.error('Failed to initialize Firebase', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Lazily initializes Firestore from the shared firebase-admin App. Returns null
+ * (degrades gracefully) when the credential is missing or invalid.
+ */
+export function getDb(): Firestore | null {
+  if (db) return db;
+  const firebaseApp = getFirebaseApp();
+  if (!firebaseApp) return null;
+
+  try {
+    db = getFirestore(firebaseApp);
+    // Cached API payloads (e.g. tracking summaries) contain optional fields that
+    // may be `undefined`; ignore them instead of throwing on write.
+    try {
+      db.settings({ ignoreUndefinedProperties: true });
+    } catch {
+      // settings() throws if called more than once — safe to ignore.
+    }
     return db;
   } catch (err) {
     logger.error('Failed to initialize Firestore', {

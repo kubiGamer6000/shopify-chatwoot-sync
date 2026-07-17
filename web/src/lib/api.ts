@@ -105,13 +105,18 @@ export async function sendReply(
 export async function cancelSubscription(
   subscriptionId: string,
   conversationId?: number | null,
+  email?: string | null,
 ): Promise<{ ok: boolean; labelled?: boolean }> {
+  const body: Record<string, unknown> = {};
+  if (conversationId) body.conversationId = conversationId;
+  if (email) body.email = email;
+
   const res = await fetch(
     `${API_BASE}/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
     {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(conversationId ? { conversationId } : {}),
+      body: JSON.stringify(body),
     },
   );
   return handle<{ ok: boolean; labelled?: boolean }>(res);

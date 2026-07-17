@@ -7,7 +7,6 @@ import { gatherContextWithMatching, postAiDraft } from './aiDraft.js';
 import {
   classifyConversation,
   CLASSIFICATION_LABELS,
-  NON_ESCALATION_LABELS,
   type ClassificationLabel,
 } from './classifier.js';
 import {
@@ -19,6 +18,9 @@ import {
 } from './chatwootConversation.js';
 import { cancelActiveSubscriptionsByEmail } from './skio.js';
 import { generateCompletion } from './claude.js';
+import { recordAiUsage, recordAgentBotDecision } from './aiAudit.js';
+import { getAiConfig } from './appConfig.js';
+import type { AiConfig } from '../types/config.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
 import { formatResponderMessage } from '../utils/responderFormat.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
@@ -26,17 +28,6 @@ import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
 
 const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
-
-/**
- * Labels eligible for the autonomous responder in **backfill** mode. Stricter
- * than the live flow: only conversations whose routing labels are a non-empty
- * subset of these are touched. Everything else (including `other`) is skipped
- * entirely — no escalation, no holding reply, no draft, no status change.
- */
-const RESPONDER_ONLY_LABELS = new Set<ClassificationLabel>([
-  'sub-cancel',
-  'order-status',
-]);
 
 function holdingFallback(name?: string): string {
   return [
@@ -51,17 +42,11 @@ function holdingFallback(name?: string): string {
  * (where no responder agent runs). Falls back to a fixed message on failure.
  */
 async function generateHoldingReply(ctx: PromptContext): Promise<string> {
-  const system = [
-    'You are a customer support agent at Scandi Gum.',
-    'Write a brief, warm holding reply (2 to 3 short sentences) telling the customer their request needs a bit of extra help and that one of our team members will be in touch shortly to take care of it.',
-    'Do NOT promise any specific outcome (no refunds, no discounts) or any timeline beyond "shortly". Do NOT try to resolve the issue.',
-    'Greet by name when available. Do NOT include any sign-off or signature — the system appends one automatically.',
-    'Respond in English. Do not use em dashes. Output ONLY the message body.',
-  ].join('\n');
-
-  const reply = await generateCompletion(system, buildPrompt(ctx), {
-    model: env.claudeClassifierModel,
-    maxTokens: 400,
+  const cfg = await getAiConfig();
+  const reply = await generateCompletion(cfg.holdingSystemPrompt, buildPrompt(ctx), {
+    model: cfg.holdingModel,
+    maxTokens: cfg.holdingMaxTokens,
+    meta: { kind: 'holding', conversationId: ctx.conversationId },
   });
 
   const text = reply?.trim();
@@ -80,10 +65,11 @@ async function hardEscalate(params: {
   reason: string;
 }): Promise<void> {
   const { conversationId, contactId, email, ctx, reason } = params;
+  const holdingReplyEnabled = (await getAiConfig()).holdingReplyEnabled;
   try {
-    // Holding reply is optional (AGENT_BOT_HOLDING_REPLY). When disabled, the
-    // bot stays silent and just hands the conversation to a human.
-    if (env.agentBotHoldingReplyEnabled) {
+    // Holding reply is optional (holdingReplyEnabled). When disabled, the bot
+    // stays silent and just hands the conversation to a human.
+    if (holdingReplyEnabled) {
       const holding = await generateHoldingReply(ctx);
       await sendReply(conversationId, formatResponderMessage(holding));
     }
@@ -92,7 +78,7 @@ async function hardEscalate(params: {
     logger.info('Hard-escalated conversation', {
       conversationId,
       reason,
-      holdingReply: env.agentBotHoldingReplyEnabled,
+      holdingReply: holdingReplyEnabled,
     });
   } catch (err) {
     logger.error('Hard escalation failed', {
@@ -143,8 +129,9 @@ async function runResponderAgent(params: {
   noEscalate?: boolean;
 }): Promise<'responded' | 'escalated' | 'skipped'> {
   const { conversationId, contactId, email, ctx, labels, noEscalate } = params;
+  const cfg = await getAiConfig();
 
-  if (!env.responderSystemPrompt) {
+  if (!cfg.responderSystemPrompt) {
     if (noEscalate) {
       logger.warn('Responder prompt empty — skipping (no escalation)', { conversationId });
       return 'skipped';
@@ -187,9 +174,9 @@ async function runResponderAgent(params: {
         return 'Escalation is disabled in this run. Do NOT send any reply or message. You are done.';
       }
       try {
-        // Holding reply is optional (AGENT_BOT_HOLDING_REPLY). When disabled,
-        // the bot stays silent and just hands the conversation to a human.
-        if (env.agentBotHoldingReplyEnabled) {
+        // Holding reply is optional (holdingReplyEnabled). When disabled, the
+        // bot stays silent and just hands the conversation to a human.
+        if (cfg.holdingReplyEnabled) {
           await sendReply(conversationId, formatResponderMessage(holding_reply));
         }
         await setConversationStatus(conversationId, 'open');
@@ -203,9 +190,9 @@ async function runResponderAgent(params: {
       logger.info('Responder escalated conversation', {
         conversationId,
         reason,
-        holdingReply: env.agentBotHoldingReplyEnabled,
+        holdingReply: cfg.holdingReplyEnabled,
       });
-      return env.agentBotHoldingReplyEnabled
+      return cfg.holdingReplyEnabled
         ? 'Conversation escalated to a human and the holding reply was sent. You are done; do not write any further message.'
         : 'Conversation escalated to a human (no holding reply sent). You are done; do not write any further message.';
     },
@@ -247,12 +234,22 @@ async function runResponderAgent(params: {
 
   try {
     const finalMessage = await client.beta.messages.toolRunner({
-      model: env.claudeModel,
-      max_tokens: 1024,
-      max_iterations: 5,
-      system: env.responderSystemPrompt,
+      model: cfg.responderModel,
+      max_tokens: cfg.responderMaxTokens,
+      max_iterations: cfg.responderMaxIterations,
+      system: cfg.responderSystemPrompt,
       tools,
       messages: [{ role: 'user', content: buildPrompt(ctx) }],
+    });
+
+    // Coarse usage record (final turn) for the autonomous responder run.
+    void recordAiUsage({
+      kind: 'responder',
+      model: cfg.responderModel,
+      inputTokens: finalMessage.usage?.input_tokens,
+      outputTokens: finalMessage.usage?.output_tokens,
+      conversationId,
+      contactId,
     });
 
     // The escalate tool fired. In backfill skip mode this means "leave untouched".
@@ -303,6 +300,91 @@ async function runResponderAgent(params: {
   }
 }
 
+export interface ResponderReplayResult {
+  systemPrompt: string;
+  userPrompt: string;
+  model: string;
+  toolNames: string[];
+  text: string;
+  toolInvocations: { name: string; input: unknown }[];
+  usage?: { inputTokens?: number; outputTokens?: number };
+}
+
+/**
+ * Runs the responder tool loop for the admin prompt tester with STUBBED tools:
+ * the escalate / cancel tools record their invocation and return a canned
+ * string but perform NO Chatwoot/Skio/side-effecting actions. Returns the exact
+ * prompt, the candidate reply text, and any tool calls the agent made.
+ */
+export async function runResponderReplay(params: {
+  ctx: PromptContext;
+  labels: ClassificationLabel[];
+  cfg: AiConfig;
+}): Promise<ResponderReplayResult> {
+  const { ctx, labels, cfg } = params;
+  const userPrompt = buildPrompt(ctx);
+  const toolInvocations: { name: string; input: unknown }[] = [];
+
+  const escalateTool = betaZodTool({
+    name: 'escalate_to_human',
+    description: ESCALATE_TOOL_DESC,
+    inputSchema: z.object({
+      reason: z.string().describe('Brief internal reason for escalating.'),
+      holding_reply: z
+        .string()
+        .describe('The short holding message that would be sent to the customer.'),
+    }),
+    run: async (input) => {
+      toolInvocations.push({ name: 'escalate_to_human', input });
+      return 'Conversation escalated to a human (REPLAY: no actions performed). You are done; do not write any further message.';
+    },
+  });
+
+  const cancelTool = betaZodTool({
+    name: 'cancel_subscription',
+    description: CANCEL_TOOL_DESC,
+    inputSchema: z.object({}),
+    run: async (input) => {
+      toolInvocations.push({ name: 'cancel_subscription', input });
+      return 'Subscription cancelled (REPLAY: no actions performed). Confirm the cancellation to the customer.';
+    },
+  });
+
+  const tools = labels.includes('sub-cancel')
+    ? [escalateTool, cancelTool]
+    : [escalateTool];
+  const toolNames = labels.includes('sub-cancel')
+    ? ['escalate_to_human', 'cancel_subscription']
+    : ['escalate_to_human'];
+
+  const finalMessage = await client.beta.messages.toolRunner({
+    model: cfg.responderModel,
+    max_tokens: cfg.responderMaxTokens,
+    max_iterations: cfg.responderMaxIterations,
+    system: cfg.responderSystemPrompt,
+    tools,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+
+  const text = finalMessage.content
+    .map((b) => (b.type === 'text' ? b.text : ''))
+    .join('')
+    .trim();
+
+  return {
+    systemPrompt: cfg.responderSystemPrompt,
+    userPrompt,
+    model: cfg.responderModel,
+    toolNames,
+    text,
+    toolInvocations,
+    usage: {
+      inputTokens: finalMessage.usage?.input_tokens,
+      outputTokens: finalMessage.usage?.output_tokens,
+    },
+  };
+}
+
 export type AgentBotAction =
   | 'responded'
   | 'escalated'
@@ -316,6 +398,22 @@ export interface AgentBotRunResult {
   classified: ClassificationLabel[] | null;
   routingLabels: ClassificationLabel[];
   action: AgentBotAction;
+}
+
+/**
+ * Persists a routing decision (best-effort) and returns the result unchanged.
+ * Dry-run outcomes ('would-*') are informational only and never recorded.
+ */
+function finish(result: AgentBotRunResult): AgentBotRunResult {
+  if (!result.action.startsWith('would-')) {
+    void recordAgentBotDecision({
+      conversationId: result.conversationId,
+      classified: result.classified,
+      routingLabels: result.routingLabels,
+      action: result.action,
+    });
+  }
+  return result;
 }
 
 /**
@@ -341,6 +439,9 @@ export async function processAgentBotConversation(
   const { conversationId, contactId, email } = params;
   const dryRun = opts.dryRun ?? false;
   const backfill = opts.backfill ?? false;
+  const cfg = await getAiConfig();
+  const autoRespondSet = new Set<string>(cfg.autoRespondLabels);
+  const backfillSet = new Set<string>(cfg.backfillAutoRespondLabels);
 
   // 1. Context + Shopify matching.
   const { context: ctx } = await gatherContextWithMatching({
@@ -369,19 +470,19 @@ export async function processAgentBotConversation(
     const eligible =
       classified !== null &&
       routingLabels.length > 0 &&
-      routingLabels.every((l) => RESPONDER_ONLY_LABELS.has(l));
+      routingLabels.every((l) => backfillSet.has(l));
 
     if (dryRun) {
-      return {
+      return finish({
         conversationId,
         classified,
         routingLabels,
         action: eligible ? 'would-respond' : 'would-skip',
-      };
+      });
     }
 
     if (!eligible) {
-      return { conversationId, classified, routingLabels, action: 'skipped' };
+      return finish({ conversationId, classified, routingLabels, action: 'skipped' });
     }
 
     const outcome = await runResponderAgent({
@@ -392,7 +493,7 @@ export async function processAgentBotConversation(
       labels: routingLabels,
       noEscalate: true,
     });
-    return { conversationId, classified, routingLabels, action: outcome };
+    return finish({ conversationId, classified, routingLabels, action: outcome });
   }
 
   // --- Live flow ---
@@ -401,15 +502,15 @@ export async function processAgentBotConversation(
   const mustEscalate =
     classified === null ||
     routingLabels.length === 0 ||
-    routingLabels.some((l) => !NON_ESCALATION_LABELS.has(l));
+    routingLabels.some((l) => !autoRespondSet.has(l));
 
   if (dryRun) {
-    return {
+    return finish({
       conversationId,
       classified,
       routingLabels,
       action: mustEscalate ? 'would-escalate' : 'would-respond',
-    };
+    });
   }
 
   if (mustEscalate) {
@@ -420,7 +521,7 @@ export async function processAgentBotConversation(
       ctx,
       reason: `labels=[${routingLabels.join(', ')}] classified=${classified === null ? 'failed' : 'ok'}`,
     });
-    return { conversationId, classified, routingLabels, action: 'escalated' };
+    return finish({ conversationId, classified, routingLabels, action: 'escalated' });
   }
 
   // 5. Eligible (subset of sub-cancel / order-status / other) → responder agent.
@@ -432,7 +533,7 @@ export async function processAgentBotConversation(
     labels: routingLabels,
   });
 
-  return { conversationId, classified, routingLabels, action: outcome };
+  return finish({ conversationId, classified, routingLabels, action: outcome });
 }
 
 /**

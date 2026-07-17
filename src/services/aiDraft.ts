@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
-import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { cacheGet, cacheSet } from './cache.js';
+import { getAiConfig } from './appConfig.js';
 import {
   getConversationMessages,
   getConversationDetails,
@@ -47,6 +49,16 @@ export interface DraftLookupMeta {
 export interface GatheredDraftContext {
   context: PromptContext;
   lookup: DraftLookupMeta;
+}
+
+// Negative-result cache for the Shopify matcher agent (keyed by contact +
+// message hash). 12h is long enough to absorb redeliveries/regenerations but
+// short enough that a customer who later provides better info is retried.
+const MATCH_NEG_CACHE_NS = 'shopifyMatchNeg';
+const MATCH_NEG_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+
+function hashMessage(message: string): string {
+  return createHash('sha1').update(message).digest('hex').slice(0, 16);
 }
 
 /**
@@ -302,26 +314,48 @@ export function toUserContent(
  * Sets the "ask for order number / email" guidance when no order data is
  * available. Shared by the AI-draft flow and the autonomous AgentBot responder.
  */
-export async function gatherContextWithMatching(params: {
-  conversationId: number;
-  contactId: number;
-  email?: string | null;
-}): Promise<{ context: PromptContext; lookup: DraftLookupMeta }> {
+export async function gatherContextWithMatching(
+  params: {
+    conversationId: number;
+    contactId: number;
+    email?: string | null;
+  },
+  opts: { dryRun?: boolean } = {},
+): Promise<{ context: PromptContext; lookup: DraftLookupMeta }> {
+  const dryRun = opts.dryRun ?? false;
   const { context: ctx, lookup } = await gatherDraftContext(params);
 
   if (!lookup.matched && !lookup.alreadyLinked) {
-    logger.info('Contact unmatched — running Shopify matcher agent', {
-      conversationId: params.conversationId,
-      contactId: params.contactId,
-    });
-    const resolved = await resolveUnmatchedCustomer({
-      contactId: params.contactId,
-      customerMessage: lookup.customerMessage,
-      chatwootEmail: lookup.chatwootEmail,
-      existingCustomAttributes: lookup.customAttributes,
-    });
-    if (resolved.resolved) {
-      await applyResolution(ctx, resolved);
+    // The matcher is an expensive Claude tool loop. Its RESULT depends purely on
+    // the customer's message text, so we cache "no match found for THIS exact
+    // message" to avoid re-running it for redeliveries / regenerations. A new
+    // message (e.g. one that now includes an order number) has a different hash
+    // → cache miss → the matcher runs again, so we never miss a real match.
+    const negKey = `${params.contactId}:${hashMessage(lookup.customerMessage)}`;
+    const knownNoMatch = await cacheGet<boolean>(MATCH_NEG_CACHE_NS, negKey);
+
+    if (knownNoMatch) {
+      logger.info('Skipping Shopify matcher (cached no-match for this message)', {
+        conversationId: params.conversationId,
+        contactId: params.contactId,
+      });
+    } else {
+      logger.info('Contact unmatched — running Shopify matcher agent', {
+        conversationId: params.conversationId,
+        contactId: params.contactId,
+      });
+      const resolved = await resolveUnmatchedCustomer({
+        contactId: params.contactId,
+        customerMessage: lookup.customerMessage,
+        chatwootEmail: lookup.chatwootEmail,
+        existingCustomAttributes: lookup.customAttributes,
+        dryRun,
+      });
+      if (resolved.resolved) {
+        await applyResolution(ctx, resolved);
+      } else if (!dryRun) {
+        await cacheSet(MATCH_NEG_CACHE_NS, negKey, true, MATCH_NEG_CACHE_TTL_MS);
+      }
     }
   }
 
@@ -351,9 +385,10 @@ export async function postAiDraft(params: {
 }): Promise<void> {
   const { conversationId, contactId } = params;
 
-  const systemPrompt = env.claudeSystemPrompt;
+  const cfg = await getAiConfig();
+  const systemPrompt = cfg.draftSystemPrompt;
   if (!systemPrompt) {
-    logger.warn('CLAUDE_SYSTEM_PROMPT is empty, skipping AI draft', { conversationId });
+    logger.warn('Draft system prompt is empty, skipping AI draft', { conversationId });
     return;
   }
 
@@ -401,9 +436,15 @@ export async function postAiDraft(params: {
     });
   }
 
-  const draft = await generateStructuredDraft(systemPrompt, [
-    { role: 'user', content: toUserContent(userPrompt, images) },
-  ]);
+  const draft = await generateStructuredDraft(
+    systemPrompt,
+    [{ role: 'user', content: toUserContent(userPrompt, images) }],
+    {
+      model: cfg.draftModel,
+      maxTokens: cfg.draftMaxTokens,
+      meta: { kind: 'draft', conversationId, contactId },
+    },
+  );
   if (!draft) {
     logger.warn('Claude returned no draft', { conversationId });
     return;
@@ -416,7 +457,7 @@ export async function postAiDraft(params: {
     response: draft.response,
     noteToAgent: draft.noteToAgent ?? null,
     customerMessageTranslation: draft.customerMessageTranslation ?? null,
-    model: env.claudeModel,
+    model: cfg.draftModel,
     generatedAt: new Date().toISOString(),
     source: 'auto',
   });
@@ -459,9 +500,10 @@ export async function generateResponse(params: {
   previousResponse?: string | null;
   correction?: string | null;
 }): Promise<StructuredDraft | null> {
-  const systemPrompt = env.claudeSystemPrompt;
+  const cfg = await getAiConfig();
+  const systemPrompt = cfg.draftSystemPrompt;
   if (!systemPrompt) {
-    logger.warn('CLAUDE_SYSTEM_PROMPT is empty, cannot generate response');
+    logger.warn('Draft system prompt is empty, cannot generate response');
     return null;
   }
 
@@ -498,7 +540,15 @@ export async function generateResponse(params: {
     messages = [{ role: 'user', content: toUserContent(buildPrompt(ctx), images) }];
   }
 
-  const draft = await generateStructuredDraft(systemPrompt, messages);
+  const draft = await generateStructuredDraft(systemPrompt, messages, {
+    model: cfg.draftModel,
+    maxTokens: cfg.draftMaxTokens,
+    meta: {
+      kind: 'draft-manual',
+      conversationId: params.conversationId,
+      contactId: params.contactId,
+    },
+  });
   if (!draft) return null;
 
   await storeDraft({
@@ -507,7 +557,7 @@ export async function generateResponse(params: {
     response: draft.response,
     noteToAgent: draft.noteToAgent ?? null,
     customerMessageTranslation: draft.customerMessageTranslation ?? null,
-    model: env.claudeModel,
+    model: cfg.draftModel,
     generatedAt: new Date().toISOString(),
     source: 'manual',
   });

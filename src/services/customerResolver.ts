@@ -9,6 +9,8 @@ import {
   searchOrderByName,
 } from './shopify.js';
 import { linkShopifyEmail } from './chatwoot.js';
+import { recordAiUsage } from './aiAudit.js';
+import { getAiConfig } from './appConfig.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
@@ -79,24 +81,12 @@ const SEARCH_BY_ORDER_DESC =
   'customer email to the Chatwoot contact so future lookups resolve ' +
   'automatically. Accepts the order number with or without the leading "#".';
 
-function buildResolverSystemPrompt(chatwootEmail: string | null): string {
+function buildResolverSystemPrompt(
+  template: string,
+  chatwootEmail: string | null,
+): string {
   const knownEmail = chatwootEmail ?? 'unknown';
-  return [
-    'You are a Shopify lookup assistant for Scandi customer support.',
-    '',
-    `A customer has written in, but their Chatwoot contact (email: ${knownEmail}) is NOT linked to a Shopify account that has any orders. They likely ordered using a different email, or they have not ordered yet.`,
-    '',
-    'Your ONLY job is to locate their Shopify account using the tools, but ONLY when the information needed is clearly present in their message:',
-    `- If the message clearly contains an email address that is different from "${knownEmail}", call search_customer_by_email with that address.`,
-    '- If the message clearly contains an order number (e.g. "#1234", "order 1234"), call search_customer_by_order_number with it.',
-    '- If it contains both, prefer the order number.',
-    '- If the message contains NEITHER a usable alternate email NOR an order number, do NOT call any tool. Just reply with the single word: NONE',
-    '',
-    'After a tool reports a successful match, you are done — reply with the single word: DONE',
-    'If a tool reports "not found", you may try the other tool if relevant info is available, otherwise reply NONE.',
-    '',
-    'Do not write any customer-facing message and do not ask the customer questions. Only call tools or reply with NONE / DONE.',
-  ].join('\n');
+  return template.replaceAll('{{email}}', knownEmail);
 }
 
 /**
@@ -112,9 +102,14 @@ export async function resolveUnmatchedCustomer(params: {
   customerMessage: string;
   chatwootEmail: string | null;
   existingCustomAttributes: Record<string, unknown>;
+  // When true, the matcher still runs and resolves the customer, but never
+  // writes `shopify_email_link` back to Chatwoot (used by the replay/tester).
+  dryRun?: boolean;
 }): Promise<ResolutionResult> {
   const { contactId, customerMessage, chatwootEmail, existingCustomAttributes } =
     params;
+  const dryRun = params.dryRun ?? false;
+  const cfg = await getAiConfig();
 
   const result: ResolutionResult = {
     resolved: false,
@@ -134,7 +129,7 @@ export async function resolveUnmatchedCustomer(params: {
     result.shopifyCustomer = customer;
     result.orders = orders;
     result.linkedEmail = email;
-    if (email) {
+    if (email && !dryRun) {
       await linkShopifyEmail(contactId, email, existingCustomAttributes);
     }
     return formatCustomerSummary(customer, orders);
@@ -202,11 +197,14 @@ export async function resolveUnmatchedCustomer(params: {
   });
 
   try {
-    await client.beta.messages.toolRunner({
-      model: env.claudeModel,
-      max_tokens: 1024,
-      max_iterations: 4,
-      system: buildResolverSystemPrompt(chatwootEmail),
+    const finalMessage = await client.beta.messages.toolRunner({
+      model: cfg.resolverModel,
+      max_tokens: cfg.resolverMaxTokens,
+      max_iterations: cfg.resolverMaxIterations,
+      system: buildResolverSystemPrompt(
+        cfg.resolverSystemPromptTemplate,
+        chatwootEmail,
+      ),
       tools: [searchByEmail, searchByOrder],
       messages: [
         {
@@ -214,6 +212,13 @@ export async function resolveUnmatchedCustomer(params: {
           content: `The customer wrote:\n\n"""\n${customerMessage}\n"""`,
         },
       ],
+    });
+    void recordAiUsage({
+      kind: 'resolver',
+      model: cfg.resolverModel,
+      inputTokens: finalMessage.usage?.input_tokens,
+      outputTokens: finalMessage.usage?.output_tokens,
+      contactId,
     });
   } catch (err) {
     logger.warn('Customer resolution agent failed', {

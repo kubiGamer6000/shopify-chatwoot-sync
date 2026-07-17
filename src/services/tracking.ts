@@ -1,6 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { cacheGet, cacheSet } from './cache.js';
 import type {
   TrackInfoResponse,
   RegisterTrackingItem,
@@ -151,9 +152,33 @@ function buildSummary(item: AcceptedTrackItem): TrackingSummary {
   };
 }
 
+const TRACKING_CACHE_NS = 'tracking';
+const HOUR_MS = 60 * 60 * 1000;
+
 /**
- * Fetches tracking status for a list of tracking numbers.
- * If any numbers are rejected (not registered), registers them and retries once.
+ * How long to trust a cached tracking summary, based on its current state.
+ * Delivered shipments never change, so they're cached for a long time; anything
+ * still moving is refreshed frequently so the dashboard stays live.
+ */
+function trackingTtlMs(summary: TrackingSummary): number {
+  const s = (summary.status ?? '').toLowerCase().replace(/[\s_]/g, '');
+  if (s === 'delivered') return 30 * 24 * HOUR_MS;
+  if (s.includes('exception') || s.includes('failure') || s.includes('undelivered')) {
+    return 6 * HOUR_MS;
+  }
+  if (s.includes('outfordelivery') || s.includes('transit') || s.includes('pickup') || s.includes('inforeceived')) {
+    return 2 * HOUR_MS;
+  }
+  // NotFound / Expired / unknown — short TTL so it recovers quickly.
+  return 1 * HOUR_MS;
+}
+
+/**
+ * Fetches tracking status for a list of tracking numbers, using a Firestore
+ * cache in front of 17track to save quota and latency. Cached (fresh) numbers
+ * are served from the cache; only the remainder hit the live API, and each
+ * successful result is cached with a state-based TTL. Falls straight through to
+ * the live API when Firestore is disabled.
  */
 export async function getTrackingStatus(
   trackingNumbers: string[],
@@ -162,6 +187,39 @@ export async function getTrackingStatus(
   const numbers = Array.from(
     new Set(trackingNumbers.map((n) => n.trim()).filter(Boolean)),
   );
+  if (numbers.length === 0) return result;
+
+  // Serve fresh cached summaries; collect the rest for a live lookup.
+  const cachedEntries = await Promise.all(
+    numbers.map(async (n) => [n, await cacheGet<TrackingSummary>(TRACKING_CACHE_NS, n)] as const),
+  );
+  const missing: string[] = [];
+  for (const [n, summary] of cachedEntries) {
+    if (summary) result.set(n, summary);
+    else missing.push(n);
+  }
+
+  if (missing.length === 0) return result;
+
+  const live = await fetchTrackingLive(missing);
+  await Promise.all(
+    Array.from(live.entries()).map(async ([n, summary]) => {
+      result.set(n, summary);
+      await cacheSet(TRACKING_CACHE_NS, n, summary, trackingTtlMs(summary));
+    }),
+  );
+
+  return result;
+}
+
+/**
+ * Live 17track lookup for a set of tracking numbers (no caching).
+ * If any numbers are rejected (not registered), registers them and retries once.
+ */
+async function fetchTrackingLive(
+  numbers: string[],
+): Promise<Map<string, TrackingSummary>> {
+  const result = new Map<string, TrackingSummary>();
   if (numbers.length === 0) return result;
 
   const items = numbers.map((n) => ({ number: n }));

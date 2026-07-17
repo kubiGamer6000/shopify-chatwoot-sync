@@ -74,3 +74,28 @@ services:
       - key: AGENT_BOT_HOLDING_REPLY
         scope: RUN_AND_BUILD_TIME
         value: "true"
+      # Comma-separated Google emails that are always admins in the Admin
+      # Control Dashboard (bootstraps the first approver).
+      - key: ADMIN_BOOTSTRAP_EMAILS
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      # Firebase Web config for the admin SPA. Public by design (identifies, not
+      # authorizes) and baked into the build, so these are BUILD_TIME env.
+      - key: VITE_FIREBASE_API_KEY
+        scope: BUILD_TIME
+        value: "AIzaSyDYewHtIpPWtU_hB4n4GJAeWccVJTZDoH8"
+      - key: VITE_FIREBASE_AUTH_DOMAIN
+        scope: BUILD_TIME
+        value: "kybalion-pb.firebaseapp.com"
+      - key: VITE_FIREBASE_PROJECT_ID
+        scope: BUILD_TIME
+        value: "kybalion-pb"
+      - key: VITE_FIREBASE_STORAGE_BUCKET
+        scope: BUILD_TIME
+        value: "kybalion-pb.firebasestorage.app"
+      - key: VITE_FIREBASE_MESSAGING_SENDER_ID
+        scope: BUILD_TIME
+        value: "710083096792"
+      - key: VITE_FIREBASE_APP_ID
+        scope: BUILD_TIME
+        value: "1:710083096792:web:01e9717d5672ef54e567ad"

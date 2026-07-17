@@ -2,9 +2,41 @@ import axios, { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { getAccessToken } from './shopifyAuth.js';
+import { cached, cacheDelete } from './cache.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 
 const API_VERSION = '2026-01';
+
+// Short TTLs: order/customer data changes are pushed to us via Shopify webhooks
+// (which also invalidate these caches), so the TTL is only a backstop.
+const ORDERS_CACHE_NS = 'shopifyOrders';
+const CUSTOMER_CACHE_NS = 'shopifyCustomer';
+const CUSTOMER_BY_EMAIL_CACHE_NS = 'shopifyCustomerByEmail';
+const SHOPIFY_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function emailCacheKey(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/**
+ * Drops the cached Shopify data for a customer and/or email. Called from the
+ * Shopify order/customer webhooks so an update is reflected immediately.
+ */
+export async function invalidateCustomerCache(params: {
+  customerId?: number | string | null;
+  email?: string | null;
+}): Promise<void> {
+  const tasks: Promise<void>[] = [];
+  if (params.customerId != null && String(params.customerId).trim()) {
+    const id = String(params.customerId);
+    tasks.push(cacheDelete(ORDERS_CACHE_NS, id));
+    tasks.push(cacheDelete(CUSTOMER_CACHE_NS, id));
+  }
+  if (params.email && params.email.trim()) {
+    tasks.push(cacheDelete(CUSTOMER_BY_EMAIL_CACHE_NS, emailCacheKey(params.email)));
+  }
+  await Promise.all(tasks);
+}
 
 const shopifyClient = axios.create({
   baseURL: `https://${env.shopifyStoreDomain}/admin/api/${API_VERSION}`,
@@ -44,6 +76,17 @@ export async function fetchCustomerOrders(
   customerId: number,
   limit = 50,
 ): Promise<ShopifyOrder[]> {
+  // `limit` is only the page size — all pages are fetched — so the full result
+  // set is identical regardless of it; cache purely by customer id.
+  return cached(ORDERS_CACHE_NS, String(customerId), SHOPIFY_CACHE_TTL_MS, () =>
+    fetchCustomerOrdersLive(customerId, limit),
+  );
+}
+
+async function fetchCustomerOrdersLive(
+  customerId: number,
+  limit: number,
+): Promise<ShopifyOrder[]> {
   const allOrders: ShopifyOrder[] = [];
   let url: string | null =
     `/customers/${customerId}/orders.json?status=any&limit=${limit}`;
@@ -61,6 +104,14 @@ export async function fetchCustomerOrders(
 }
 
 export async function fetchCustomer(
+  customerId: number,
+): Promise<ShopifyCustomer | null> {
+  return cached(CUSTOMER_CACHE_NS, String(customerId), SHOPIFY_CACHE_TTL_MS, () =>
+    fetchCustomerLive(customerId),
+  );
+}
+
+async function fetchCustomerLive(
   customerId: number,
 ): Promise<ShopifyCustomer | null> {
   try {
@@ -92,8 +143,17 @@ export interface CustomerPage {
 
 export async function fetchCustomersPage(
   pageUrl?: string,
+  opts: { updatedAtMin?: string } = {},
 ): Promise<CustomerPage> {
-  const url = pageUrl ?? `/customers.json?limit=250`;
+  // `updated_at_min` only applies to the first page; subsequent pages use the
+  // opaque page_info cursor (Shopify rejects extra filters alongside it), which
+  // is exactly what `pageUrl` carries.
+  let url = pageUrl;
+  if (!url) {
+    const params = new URLSearchParams({ limit: '250' });
+    if (opts.updatedAtMin) params.set('updated_at_min', opts.updatedAtMin);
+    url = `/customers.json?${params.toString()}`;
+  }
   const res = await withRetry(() =>
     shopifyClient.get<{ customers: ShopifyCustomer[] }>(url),
   );
@@ -134,6 +194,17 @@ function parsePaginationNext(linkHeader?: string): string | null {
 }
 
 export async function searchCustomerByEmail(
+  email: string,
+): Promise<ShopifyCustomer | null> {
+  return cached(
+    CUSTOMER_BY_EMAIL_CACHE_NS,
+    emailCacheKey(email),
+    SHOPIFY_CACHE_TTL_MS,
+    () => searchCustomerByEmailLive(email),
+  );
+}
+
+async function searchCustomerByEmailLive(
   email: string,
 ): Promise<ShopifyCustomer | null> {
   const res = await withRetry(() =>
