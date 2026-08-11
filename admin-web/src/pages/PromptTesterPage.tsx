@@ -254,6 +254,12 @@ function OutputView({ result }: { result: ReplayResult }) {
   }
 
   // responder
+  const guard = (out.guard ?? {}) as {
+    ok?: boolean;
+    violations?: string[];
+    strippedPreamble?: boolean;
+    wouldSend?: string;
+  };
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
@@ -263,8 +269,30 @@ function OutputView({ result }: { result: ReplayResult }) {
         <Badge variant={out.routingDecision === 'would-respond' ? 'success' : 'warning'}>
           {String(out.routingDecision)}
         </Badge>
+        {guard.ok === false ? (
+          <Badge variant="warning">
+            blocked by safety guard: {(guard.violations ?? []).join(', ')}
+          </Badge>
+        ) : null}
+        {guard.strippedPreamble ? (
+          <Badge variant="warning">reasoning preamble stripped</Badge>
+        ) : null}
       </div>
-      <Section title="Candidate reply" body={String(out.text || '(no direct reply — agent used a tool)')} />
+      <Section
+        title="Would be sent to customer"
+        body={
+          guard.wouldSend ||
+          '(nothing — reply blocked by the safety guard, or the agent escalated)'
+        }
+      />
+      <Section
+        title="send_reply message"
+        body={String(out.replyMessage ?? '(agent did not use send_reply)')}
+      />
+      <Section
+        title="Free-form text (discarded)"
+        body={String(out.text || '(none)')}
+      />
       <div className="flex flex-col gap-1">
         <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
           Tool activity

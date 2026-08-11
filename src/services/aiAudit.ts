@@ -83,6 +83,44 @@ export async function recordAgentBotDecision(
   }
 }
 
+export interface ResponderGuardEvent {
+  conversationId: number;
+  /**
+   * `blocked` — the reply was not customer-safe and the conversation was
+   * escalated instead; `preamble-stripped` — leading reasoning was removed
+   * before sending; `missing-send-reply-tool` — the agent answered with
+   * free-form text instead of `send_reply`; `holding-fallback` — a generated
+   * holding reply was replaced with the canned one.
+   */
+  outcome: 'blocked' | 'preamble-stripped' | 'missing-send-reply-tool' | 'holding-fallback';
+  source: 'send_reply' | 'free-text' | 'holding_reply';
+  violations: string[];
+  /** The rejected text, kept for prompt debugging. Never sent to a customer. */
+  blockedText?: string;
+}
+
+/**
+ * Logs every time the AgentBot's customer-safety guard had to intervene. These
+ * are the signal that the responder prompt is drifting, so they are recorded
+ * even when the reply was salvaged.
+ */
+export async function recordResponderGuardEvent(
+  entry: ResponderGuardEvent,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.collection('responderGuardEvents').add({
+      ...entry,
+      blockedText: entry.blockedText?.slice(0, 4000),
+      at: new Date().toISOString(),
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.warn('Failed to record responder guard event', { error: errMessage(err) });
+  }
+}
+
 export interface SentReplyRecord {
   conversationId: number;
   message: string;

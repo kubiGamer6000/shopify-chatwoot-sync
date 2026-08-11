@@ -31,6 +31,7 @@ Reproduces generation for a conversation with all writes disabled:
 - Resolves `contactId`/`email` from the conversation, gathers context (Shopify match runs in a `dryRun` mode that skips the `shopify_email_link` write and the negative-match cache write), builds the final system + user prompt and images, and runs Claude.
 - **Skipped side effects:** posting private notes, storing drafts, writing labels, linking emails, negative-cache writes, summary refresh, sending replies, or status changes.
 - **Paths:** `draft` (full fidelity — the primary case), `classifier` (labels + reasoning + exact prompt, no label writes), and `responder` (exact prompt + routing decision + generated text via stubbed no-op tools).
+- The `responder` path also reports the [reply safety guard](agent-bot.md#reply-safety-guard) verdict and the exact message that would reach the customer, separately from the agent's discarded free-form text.
 - Optionally merges **unsaved editor overrides** from the request so you can preview a prompt change before saving it.
 
 The response returns everything needed for the debug view: the resolved context object, the final `systemPrompt`, the final `userPrompt`, the message array (with image count), the model + params, and the output.

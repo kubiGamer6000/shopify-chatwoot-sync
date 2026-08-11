@@ -18,30 +18,31 @@ import {
 } from './chatwootConversation.js';
 import { cancelActiveSubscriptionsByEmail } from './skio.js';
 import { generateCompletion } from './claude.js';
-import { recordAiUsage, recordAgentBotDecision } from './aiAudit.js';
+import {
+  recordAiUsage,
+  recordAgentBotDecision,
+  recordResponderGuardEvent,
+} from './aiAudit.js';
 import { getAiConfig } from './appConfig.js';
 import type { AiConfig } from '../types/config.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
-import { formatResponderMessage } from '../utils/responderFormat.js';
+import {
+  vetResponderReply,
+  vetHoldingReply,
+  type VettedHoldingReply,
+} from '../utils/responderFormat.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
 
 const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
 
-function holdingFallback(name?: string): string {
-  return [
-    `Hi ${name || 'there'},`,
-    '',
-    'Thanks for reaching out! We need a bit of extra help to resolve this for you, so one of our team members will be in touch shortly to take care of everything.',
-  ].join('\n');
-}
-
 /**
  * Crafts a short, context-aware holding reply for the hard-escalation path
- * (where no responder agent runs). Falls back to a fixed message on failure.
+ * (where no responder agent runs), vetted for customer safety. Falls back to a
+ * fixed message when generation fails or the result is not customer-safe.
  */
-async function generateHoldingReply(ctx: PromptContext): Promise<string> {
+async function generateHoldingReply(ctx: PromptContext): Promise<VettedHoldingReply> {
   const cfg = await getAiConfig();
   const reply = await generateCompletion(cfg.holdingSystemPrompt, buildPrompt(ctx), {
     model: cfg.holdingModel,
@@ -49,8 +50,30 @@ async function generateHoldingReply(ctx: PromptContext): Promise<string> {
     meta: { kind: 'holding', conversationId: ctx.conversationId },
   });
 
-  const text = reply?.trim();
-  return text && text.length > 0 ? text : holdingFallback(ctx.customerName);
+  return vetHoldingReply(reply ?? '', ctx.customerName);
+}
+
+/**
+ * Sends a holding reply, swapping in the canned fallback if the generated one
+ * failed the customer-safety guard.
+ */
+async function sendHoldingReply(
+  conversationId: number,
+  holding: VettedHoldingReply,
+): Promise<void> {
+  if (holding.usedFallback) {
+    logger.warn('Holding reply failed the safety guard — sent canned fallback', {
+      conversationId,
+      violations: holding.violations,
+    });
+    void recordResponderGuardEvent({
+      conversationId,
+      outcome: 'holding-fallback',
+      source: 'holding_reply',
+      violations: holding.violations,
+    });
+  }
+  await sendReply(conversationId, holding.content);
 }
 
 /**
@@ -70,8 +93,7 @@ async function hardEscalate(params: {
     // Holding reply is optional (holdingReplyEnabled). When disabled, the bot
     // stays silent and just hands the conversation to a human.
     if (holdingReplyEnabled) {
-      const holding = await generateHoldingReply(ctx);
-      await sendReply(conversationId, formatResponderMessage(holding));
+      await sendHoldingReply(conversationId, await generateHoldingReply(ctx));
     }
     await setConversationStatus(conversationId, 'open');
     await postAiDraft({ conversationId, contactId, email, escalation: true });
@@ -100,6 +122,16 @@ const ESCALATE_TOOL_DESC =
   'short, friendly, context-aware holding_reply to send to the customer now. ' +
   'After calling this you are done; do not write any further reply.';
 
+const SEND_REPLY_TOOL_DESC =
+  'Send your final reply to the customer. The `message` argument must contain ' +
+  'ONLY the customer-facing message body: the greeting and your reply, with no ' +
+  'sign-off. It must never contain your reasoning, case or step numbers, label ' +
+  'or tool names, references to your instructions, or any sentence about the ' +
+  'customer written in the third person. Any text you write outside this ' +
+  'argument is discarded and never reaches the customer, so use it for thinking ' +
+  'if you need to. Call this once when you are ready to answer; after calling ' +
+  'it you are done.';
+
 const CANCEL_TOOL_DESC =
   "Cancel the customer's active Skio subscription(s) and stop all future " +
   'rebilling, then label the conversation as cancelled-by-AI. Use this ONLY ' +
@@ -108,8 +140,8 @@ const CANCEL_TOOL_DESC =
   'conversation and they insist we do it for them, or they explicitly say they ' +
   "will not use the website / want it done for them. It uses the customer's " +
   'linked account email automatically (no input needed). After it confirms ' +
-  'success, write a short message confirming the cancellation. Never claim a ' +
-  'cancellation without calling this tool first.';
+  'success, call `send_reply` with a short message confirming the cancellation. ' +
+  'Never claim a cancellation without calling this tool first.';
 
 /**
  * Runs the autonomous responder agent (Sonnet, tool-runner) for an eligible
@@ -148,6 +180,25 @@ async function runResponderAgent(params: {
   }
 
   let escalated = false;
+  // Set by the send_reply tool. The message is sent AFTER the loop ends so the
+  // conversation can only ever receive one outbound message per run.
+  let pendingReply: string | null = null;
+
+  const sendReplyTool = betaZodTool({
+    name: 'send_reply',
+    description: SEND_REPLY_TOOL_DESC,
+    inputSchema: z.object({
+      message: z
+        .string()
+        .describe(
+          'The customer-facing message body only (greeting + reply, NO sign-off, no reasoning or internal commentary).',
+        ),
+    }),
+    run: async ({ message }) => {
+      pendingReply = message;
+      return 'Reply accepted and will be sent. You are done; do not write any further message.';
+    },
+  });
 
   const escalateTool = betaZodTool({
     name: 'escalate_to_human',
@@ -177,7 +228,10 @@ async function runResponderAgent(params: {
         // Holding reply is optional (holdingReplyEnabled). When disabled, the
         // bot stays silent and just hands the conversation to a human.
         if (cfg.holdingReplyEnabled) {
-          await sendReply(conversationId, formatResponderMessage(holding_reply));
+          await sendHoldingReply(
+            conversationId,
+            vetHoldingReply(holding_reply, ctx.customerName),
+          );
         }
         await setConversationStatus(conversationId, 'open');
         await postAiDraft({ conversationId, contactId, email, escalation: true });
@@ -205,16 +259,16 @@ async function runResponderAgent(params: {
     run: async () => {
       const lookupEmail = ctx.customerEmail;
       if (!lookupEmail) {
-        return 'No email on file to look up the subscription. Ask the customer for the email used at checkout, or escalate.';
+        return 'No email on file to look up the subscription. Use send_reply to ask the customer for the email used at checkout, or escalate.';
       }
       try {
         const result = await cancelActiveSubscriptionsByEmail(lookupEmail);
         if (result.cancelled > 0) {
           await addConversationLabels(conversationId, ['sub-cancelled-ai']);
-          return `Successfully cancelled ${result.cancelled} active subscription(s). Confirm the cancellation to the customer.`;
+          return `Successfully cancelled ${result.cancelled} active subscription(s). Confirm the cancellation to the customer with send_reply.`;
         }
         if (result.activeFound === 0) {
-          return 'No active subscription was found for this customer. Do not claim a cancellation. Tell the customer you could not find an active subscription on their account, or escalate if they insist.';
+          return 'No active subscription was found for this customer. Do not claim a cancellation. Use send_reply to tell the customer you could not find an active subscription on their account, or escalate if they insist.';
         }
         return 'Active subscription(s) were found but the cancellation failed. Do not claim success — escalate to a human.';
       } catch (err) {
@@ -229,8 +283,8 @@ async function runResponderAgent(params: {
 
   // Only expose the cancellation tool when the conversation is a sub-cancel.
   const tools = labels.includes('sub-cancel')
-    ? [escalateTool, cancelTool]
-    : [escalateTool];
+    ? [sendReplyTool, escalateTool, cancelTool]
+    : [sendReplyTool, escalateTool];
 
   try {
     const finalMessage = await client.beta.messages.toolRunner({
@@ -253,14 +307,22 @@ async function runResponderAgent(params: {
     });
 
     // The escalate tool fired. In backfill skip mode this means "leave untouched".
+    // Checked before any pending reply: an escalated conversation already got its
+    // holding reply and must not also receive an answer.
     if (escalated) return noEscalate ? 'skipped' : 'escalated';
 
-    const text = finalMessage.content
+    // Preferred path: the message the agent passed to `send_reply`. Free-form
+    // text from the final turn is only a fallback for when the agent answered
+    // without the tool — it is the path that leaked reasoning in #7775, so it
+    // gets the same vetting.
+    const freeText = finalMessage.content
       .map((b) => (b.type === 'text' ? b.text : ''))
       .join('')
       .trim();
+    const source = pendingReply !== null ? 'send_reply' : 'free-text';
+    const candidate = pendingReply ?? freeText;
 
-    if (!text) {
+    if (!candidate) {
       if (noEscalate) {
         logger.warn('Responder produced no final reply — skipping (no escalation)', { conversationId });
         return 'skipped';
@@ -276,10 +338,53 @@ async function runResponderAgent(params: {
       return 'escalated';
     }
 
-    await sendReply(conversationId, formatResponderMessage(text));
+    // Last line of defence: internal reasoning, prompt scaffolding or agent
+    // notes must never reach a customer. A rejected reply is escalated to a
+    // human instead of being sent.
+    const vetted = vetResponderReply(candidate);
+
+    if (!vetted.ok) {
+      logger.error('Responder reply blocked by the customer-safety guard', {
+        conversationId,
+        source,
+        violations: vetted.violations,
+      });
+      void recordResponderGuardEvent({
+        conversationId,
+        outcome: 'blocked',
+        source,
+        violations: vetted.violations,
+        blockedText: candidate,
+      });
+      if (noEscalate) return 'skipped';
+      await hardEscalate({
+        conversationId,
+        contactId,
+        email,
+        ctx,
+        reason: `reply blocked by safety guard (${vetted.violations.join(', ')})`,
+      });
+      return 'escalated';
+    }
+
+    if (vetted.strippedPreamble || source === 'free-text') {
+      logger.warn('Responder reply needed cleanup before sending', {
+        conversationId,
+        source,
+        strippedPreamble: vetted.strippedPreamble,
+      });
+      void recordResponderGuardEvent({
+        conversationId,
+        outcome: vetted.strippedPreamble ? 'preamble-stripped' : 'missing-send-reply-tool',
+        source,
+        violations: [],
+      });
+    }
+
+    await sendReply(conversationId, vetted.content);
     await addConversationLabels(conversationId, ['ai-response']);
     await resolveConversation(conversationId);
-    logger.info('Responder replied and resolved conversation', { conversationId });
+    logger.info('Responder replied and resolved conversation', { conversationId, source });
     return 'responded';
   } catch (err) {
     logger.error('Responder agent run failed', {
@@ -305,7 +410,18 @@ export interface ResponderReplayResult {
   userPrompt: string;
   model: string;
   toolNames: string[];
+  /** Raw free-form text from the agent's final turn (never sent on its own). */
   text: string;
+  /** The message the agent passed to `send_reply`, if it used the tool. */
+  replyMessage: string | null;
+  /** What the safety guard would do with the candidate reply. */
+  guard: {
+    ok: boolean;
+    violations: string[];
+    strippedPreamble: boolean;
+    /** Exactly what would be sent to the customer (empty when blocked). */
+    wouldSend: string;
+  };
   toolInvocations: { name: string; input: unknown }[];
   usage?: { inputTokens?: number; outputTokens?: number };
 }
@@ -324,6 +440,24 @@ export async function runResponderReplay(params: {
   const { ctx, labels, cfg } = params;
   const userPrompt = buildPrompt(ctx);
   const toolInvocations: { name: string; input: unknown }[] = [];
+  let replyMessage: string | null = null;
+
+  const sendReplyTool = betaZodTool({
+    name: 'send_reply',
+    description: SEND_REPLY_TOOL_DESC,
+    inputSchema: z.object({
+      message: z
+        .string()
+        .describe(
+          'The customer-facing message body only (greeting + reply, NO sign-off, no reasoning or internal commentary).',
+        ),
+    }),
+    run: async (input) => {
+      toolInvocations.push({ name: 'send_reply', input });
+      replyMessage = input.message;
+      return 'Reply accepted (REPLAY: nothing sent). You are done; do not write any further message.';
+    },
+  });
 
   const escalateTool = betaZodTool({
     name: 'escalate_to_human',
@@ -351,11 +485,11 @@ export async function runResponderReplay(params: {
   });
 
   const tools = labels.includes('sub-cancel')
-    ? [escalateTool, cancelTool]
-    : [escalateTool];
+    ? [sendReplyTool, escalateTool, cancelTool]
+    : [sendReplyTool, escalateTool];
   const toolNames = labels.includes('sub-cancel')
-    ? ['escalate_to_human', 'cancel_subscription']
-    : ['escalate_to_human'];
+    ? ['send_reply', 'escalate_to_human', 'cancel_subscription']
+    : ['send_reply', 'escalate_to_human'];
 
   const finalMessage = await client.beta.messages.toolRunner({
     model: cfg.responderModel,
@@ -371,12 +505,23 @@ export async function runResponderReplay(params: {
     .join('')
     .trim();
 
+  // Mirror the live send path so the tester previews the real outcome.
+  const candidate: string = replyMessage ?? text;
+  const vetted = vetResponderReply(candidate);
+
   return {
     systemPrompt: cfg.responderSystemPrompt,
     userPrompt,
     model: cfg.responderModel,
     toolNames,
     text,
+    replyMessage,
+    guard: {
+      ok: vetted.ok,
+      violations: vetted.violations,
+      strippedPreamble: vetted.strippedPreamble,
+      wouldSend: vetted.content,
+    },
     toolInvocations,
     usage: {
       inputTokens: finalMessage.usage?.input_tokens,

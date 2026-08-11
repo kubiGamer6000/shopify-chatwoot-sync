@@ -156,6 +156,8 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
         availableTools: replay.toolNames,
         toolInvocations: replay.toolInvocations,
         text: replay.text,
+        replyMessage: replay.replyMessage,
+        guard: replay.guard,
         usage: replay.usage,
       },
     };

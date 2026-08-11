@@ -28,14 +28,33 @@ For a `pending` conversation the AgentBot:
 1. Builds full context and runs the same Shopify [matcher](ai-drafts.md#unmatched-contact-matching).
 2. Classifies + merges labels.
 3. **Hard-escalates** (no responder call) if classification fails, or if any merged label falls outside the auto-respond set `{ sub-cancel, order-status, other }`. **Refund always escalates.**
-4. Otherwise runs the **responder agent** (Sonnet, Anthropic Tool Runner) with the prompt in [`src/config/responderPrompt.txt`](../src/config/responderPrompt.txt). Its replies go **directly to the customer**, then the conversation is **resolved**.
+4. Otherwise runs the **responder agent** (Sonnet, Anthropic Tool Runner) with the prompt in [`src/config/responderPrompt.txt`](../src/config/responderPrompt.txt). Its replies go **directly to the customer** (after the [safety guard](#reply-safety-guard)), then the conversation is **resolved**.
 
 > The auto-respond label sets and the holding-reply toggle are live-editable from the [Admin Control Dashboard](admin-dashboard.md); defaults fall back to the values above.
 
 ### Responder tools
 
+- **`send_reply(message)`** — always available. The only sanctioned way to answer a customer: `message` carries the reply body, and everything else the agent writes is discarded. The message is sent after the tool loop finishes, so a run can never produce two outbound messages.
 - **`escalate_to_human(reason, holding_reply)`** — always available. Sends a short, context-aware holding reply, sets the conversation `open`, and triggers an escalation draft for the human.
 - **`cancel_subscription()`** — injected only when `sub-cancel` is present. Cancels the customer's active Skio subscription(s) by their linked email and adds `sub-cancelled-ai`. Used only when the customer insists we cancel for them.
+
+### Reply safety guard
+
+Because responder replies reach the customer with no human review, every model-authored message is vetted by [`src/utils/responderFormat.ts`](../src/utils/responderFormat.ts) before it is sent. Prompt rules alone are not enough: in conversation #7775 the agent narrated its reasoning ("order status is Case 2… so I send the self-service link only") above an otherwise correct reply, and the whole thing was delivered.
+
+The guard is deterministic and applies to the responder reply, the agent's `holding_reply`, and the hard-escalation holding reply:
+
+1. **Preamble strip** — if internal commentary appears before a real greeting line, everything above the greeting is dropped.
+2. **Marker scan** — what remains must be free of reasoning, playbook references (`Case 1`, `Step 2`), pipeline vocabulary (label/tool names, "escalate"), agent notes, prompt scaffolding (`--- ORDER HISTORY ---`), and AI self-disclosure.
+3. **Fail closed** — a reply that still trips a marker is **never sent**: the conversation is hard-escalated to a human instead. A rejected *holding* reply is swapped for the fixed fallback (it is already being handed off).
+
+The guard is intentionally broad, since a false positive costs one escalation while a false negative is a leak. Every intervention is logged and recorded to `responderGuardEvents` ([caching-and-storage.md](caching-and-storage.md)) — a rising count there means the responder prompt is drifting.
+
+```bash
+npx tsx src/scripts/verifyResponderGuard.ts   # replays the #7775 leak + regression cases (no credentials)
+```
+
+The [prompt tester](admin-dashboard.md) shows the guard verdict alongside the exact text that would be sent.
 
 ### Contextual holding reply
 

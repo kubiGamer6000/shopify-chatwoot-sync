@@ -122,7 +122,8 @@ export function buildDefaultAiConfig() {
     classifierMaxTokens: 400,
     summaryMaxTokens: 1500,
     holdingMaxTokens: 400,
-    responderMaxTokens: 1024,
+    // Headroom for a short thinking pass plus the send_reply tool call.
+    responderMaxTokens: 2048,
     responderMaxIterations: 5,
     resolverMaxTokens: 1024,
     resolverMaxIterations: 4,
