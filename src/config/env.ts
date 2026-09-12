@@ -43,9 +43,10 @@ export const env = {
   port: Number(process.env.PORT) || 8080,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
   claudeSystemPrompt: process.env.CLAUDE_SYSTEM_PROMPT || loadPromptFile('systemPrompt.txt'),
-  claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
-  // Cheaper model for the per-message conversation classifier (labels/routing).
-  claudeClassifierModel: process.env.CLAUDE_CLASSIFIER_MODEL || 'claude-haiku-4-5',
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+  // Model for the per-message conversation classifier (labels/routing) and
+  // holding replies.
+  claudeClassifierModel: process.env.CLAUDE_CLASSIFIER_MODEL || 'claude-sonnet-5',
   // System prompt for the autonomous AgentBot responder (sent directly to customers).
   responderSystemPrompt:
     process.env.CLAUDE_RESPONDER_PROMPT || loadPromptFile('responderPrompt.txt'),

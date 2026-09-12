@@ -8,8 +8,8 @@
  * writes, email linking, negative-cache writes, summary refresh, replies, or
  * status changes. The Shopify matcher runs in `dryRun` mode.
  */
-import { gatherContextWithMatching, toUserContent } from './aiDraft.js';
-import { gatherCustomerImages } from './attachments.js';
+import { gatherContextWithMatching } from './aiDraft.js';
+import { gatherCustomerImages, toUserContent } from './attachments.js';
 import { generateStructuredDraft } from './claude.js';
 import {
   getConversationDetails,
@@ -103,9 +103,17 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     { dryRun: true },
   );
 
+  // Customer images, as every live AI path now sees them.
+  const rawImages = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
+  const images: ReplayImage[] = rawImages.map((img) => ({
+    mediaType: img.mediaType,
+    bytes: Math.round((img.base64.length * 3) / 4),
+    dataUrl: `data:${img.mediaType};base64,${img.base64}`,
+  }));
+
   if (kind === 'classifier') {
     const currentLabels = await getConversationLabels(conversationId);
-    const preview = await classifyForReplay(ctx, currentLabels, cfg);
+    const preview = await classifyForReplay(ctx, currentLabels, cfg, rawImages);
     return {
       kind,
       conversationId,
@@ -114,7 +122,7 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       model: preview.model,
       systemPrompt: preview.systemPrompt,
       userPrompt: preview.userPrompt,
-      images: [],
+      images,
       context: { ...serializeContext(ctx), currentLabels },
       output: { labels: preview.labels, reasoning: preview.reasoning },
     };
@@ -122,7 +130,7 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
 
   if (kind === 'responder') {
     const currentLabels = await getConversationLabels(conversationId);
-    const preview = await classifyForReplay(ctx, currentLabels, cfg);
+    const preview = await classifyForReplay(ctx, currentLabels, cfg, rawImages);
     const classified = preview.labels ?? [];
     const routingLabels = Array.from(
       new Set<string>([...currentLabels, ...classified]),
@@ -134,7 +142,12 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       routingLabels.length === 0 ||
       routingLabels.some((l) => !autoRespondSet.has(l));
 
-    const replay = await runResponderReplay({ ctx, labels: routingLabels, cfg });
+    const replay = await runResponderReplay({
+      ctx,
+      labels: routingLabels,
+      cfg,
+      images: rawImages,
+    });
     return {
       kind,
       conversationId,
@@ -143,7 +156,7 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       model: replay.model,
       systemPrompt: replay.systemPrompt,
       userPrompt: replay.userPrompt,
-      images: [],
+      images,
       context: {
         ...serializeContext(ctx),
         currentLabels,
@@ -166,12 +179,6 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
   // Default: draft path (highest fidelity).
   if (req.escalation) ctx.escalationContext = true;
 
-  const rawImages = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
-  const images: ReplayImage[] = rawImages.map((img) => ({
-    mediaType: img.mediaType,
-    bytes: Math.round((img.base64.length * 3) / 4),
-    dataUrl: `data:${img.mediaType};base64,${img.base64}`,
-  }));
   const userPrompt = buildPrompt(ctx);
   const content = toUserContent(userPrompt, rawImages);
 
@@ -181,6 +188,7 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     {
       model: cfg.draftModel,
       maxTokens: cfg.draftMaxTokens,
+      effort: cfg.draftEffort,
       meta: { kind: 'draft-replay', conversationId, contactId },
     },
   );

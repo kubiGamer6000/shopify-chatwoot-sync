@@ -13,7 +13,11 @@ import {
 } from './chatwootConversation.js';
 import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
-import { gatherCustomerImages, type CustomerImage } from './attachments.js';
+import {
+  gatherCustomerImages,
+  toUserContent,
+  type CustomerImage,
+} from './attachments.js';
 import { resolveUnmatchedCustomer } from './customerResolver.js';
 import { classifyConversation } from './classifier.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
@@ -23,7 +27,6 @@ import {
 } from './customerSummary.js';
 import { storeDraft } from './draftStore.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
-import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { TrackingSummary } from '../types/tracking.js';
 
@@ -281,34 +284,6 @@ export function formatDraftNote(draft: StructuredDraft): string {
 }
 
 /**
- * Combines the text prompt with any customer image attachments into a Claude
- * message `content`. Returns a plain string when there are no images (so
- * nothing changes for the common case), or a multimodal content-block array
- * (text + image blocks) when the customer attached images to their message.
- */
-export function toUserContent(
-  text: string,
-  images: CustomerImage[],
-): string | Anthropic.ContentBlockParam[] {
-  if (images.length === 0) return text;
-
-  const blocks: Anthropic.ContentBlockParam[] = [
-    { type: 'text', text },
-    {
-      type: 'text',
-      text: `The customer attached ${images.length} image(s) to their message, shown below. Take them into account when writing your reply (e.g. a photo of a defect or a delivered parcel).`,
-    },
-  ];
-  for (const img of images) {
-    blocks.push({
-      type: 'image',
-      source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
-    });
-  }
-  return blocks;
-}
-
-/**
  * Gathers the prompt context and runs the Shopify matcher agent when the
  * contact isn't matched to an account with orders (and isn't already linked).
  * Sets the "ask for order number / email" guidance when no order data is
@@ -382,6 +357,10 @@ export async function postAiDraft(params: {
   // When true, also classify the conversation and merge labels (used on
   // human-owned/open conversations, where the AgentBot doesn't run).
   classify?: boolean;
+  // Already-gathered context + images (AgentBot escalation), so the Chatwoot,
+  // Shopify, tracking and matcher lookups aren't repeated.
+  context?: PromptContext;
+  images?: CustomerImage[];
 }): Promise<void> {
   const { conversationId, contactId } = params;
 
@@ -392,21 +371,36 @@ export async function postAiDraft(params: {
     return;
   }
 
-  const { context: ctx } = await gatherContextWithMatching({
-    conversationId,
-    contactId,
-    email: params.email,
-  });
+  const ctx: PromptContext = params.context
+    ? { ...params.context }
+    : (
+        await gatherContextWithMatching({
+          conversationId,
+          contactId,
+          email: params.email,
+        })
+      ).context;
 
   if (params.escalation) {
     ctx.escalationContext = true;
+  }
+
+  // Include any images the customer attached to their message(s) so the model
+  // can see them (e.g. a photo of a product defect). Best-effort.
+  const images =
+    params.images ?? (await gatherCustomerImages(ctx.currentMessages).catch(() => []));
+  if (images.length > 0) {
+    logger.info('Attached customer images to draft prompt', {
+      conversationId,
+      imageCount: images.length,
+    });
   }
 
   // Maintain conversation labels on open conversations (best-effort).
   if (params.classify) {
     try {
       const currentLabels = await getConversationLabels(conversationId);
-      const classified = await classifyConversation(ctx, currentLabels);
+      const classified = await classifyConversation(ctx, currentLabels, images);
       if (classified && classified.length > 0) {
         await addConversationLabels(conversationId, classified);
       }
@@ -426,22 +420,13 @@ export async function postAiDraft(params: {
     logger.debug('Posted debug prompt to conversation', { conversationId });
   }
 
-  // Include any images the customer attached to their message(s) so the model
-  // can see them (e.g. a photo of a product defect). Best-effort.
-  const images = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
-  if (images.length > 0) {
-    logger.info('Attached customer images to draft prompt', {
-      conversationId,
-      imageCount: images.length,
-    });
-  }
-
   const draft = await generateStructuredDraft(
     systemPrompt,
     [{ role: 'user', content: toUserContent(userPrompt, images) }],
     {
       model: cfg.draftModel,
       maxTokens: cfg.draftMaxTokens,
+      effort: cfg.draftEffort,
       meta: { kind: 'draft', conversationId, contactId },
     },
   );
@@ -472,18 +457,6 @@ export async function postAiDraft(params: {
     customerName: ctx.customerName,
     orders: ctx.orders,
   });
-}
-
-export async function handleIncomingMessage(
-  payload: ChatwootWebhookPayload,
-): Promise<void> {
-  const conversationId = payload.conversation.id;
-  const contactId = payload.sender.id;
-  const contactEmail = payload.sender.email;
-
-  logger.info('Processing AI draft', { conversationId, contactId, contactEmail });
-
-  await postAiDraft({ conversationId, contactId, email: contactEmail });
 }
 
 /**
@@ -543,6 +516,7 @@ export async function generateResponse(params: {
   const draft = await generateStructuredDraft(systemPrompt, messages, {
     model: cfg.draftModel,
     maxTokens: cfg.draftMaxTokens,
+    effort: cfg.draftEffort,
     meta: {
       kind: 'draft-manual',
       conversationId: params.conversationId,

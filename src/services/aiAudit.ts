@@ -65,6 +65,8 @@ export interface AgentBotDecisionRecord {
   classified: string[] | null;
   routingLabels: string[];
   action: string;
+  /** Why the conversation was escalated/skipped/failed (null when answered). */
+  reason?: string | null;
 }
 
 /** Stores the latest AgentBot routing decision for a conversation. */
@@ -124,7 +126,7 @@ export async function recordResponderGuardEvent(
 export interface SentReplyRecord {
   conversationId: number;
   message: string;
-  source: 'dashboard' | 'agent-bot';
+  source: 'dashboard' | 'agent-bot' | 'agent-bot-holding';
 }
 
 /**

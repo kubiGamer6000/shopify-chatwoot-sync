@@ -1,3 +1,4 @@
+import type Anthropic from '@anthropic-ai/sdk';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
@@ -171,4 +172,32 @@ export async function gatherCustomerImages(
   }
 
   return images;
+}
+
+/**
+ * Combines the text prompt with any customer image attachments into a Claude
+ * message `content`. Returns a plain string when there are no images (so
+ * nothing changes for the common case), or a multimodal content-block array
+ * (text + image blocks) when the customer attached images to their message.
+ */
+export function toUserContent(
+  text: string,
+  images: CustomerImage[],
+): string | Anthropic.ContentBlockParam[] {
+  if (images.length === 0) return text;
+
+  const blocks: Anthropic.ContentBlockParam[] = [
+    { type: 'text', text },
+    {
+      type: 'text',
+      text: `The customer attached ${images.length} image(s) to their message, shown below. Take them into account (e.g. a photo of a defect or a delivered parcel).`,
+    },
+  ];
+  for (const img of images) {
+    blocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+    });
+  }
+  return blocks;
 }

@@ -60,8 +60,8 @@ Best-effort, fire-and-forget writes (never throw):
 |------------|--------|---------|
 | `aiUsage` | auto | Per-call token usage: `{ kind, model, inputTokens, outputTokens, conversationId?, contactId?, at, ts }`. `kind` ∈ draft, draft-manual, structured, completion, summary, classify, responder, resolver, holding, … |
 | `classifications` | conversation id | Latest classifier decision `{ labels, reasoning, model }` |
-| `agentBotDecisions` | conversation id | Latest routing decision `{ classified, routingLabels, action }` (dry-run `would-*` outcomes are not recorded) |
-| `sentReplies` | auto | Replies actually sent from the dashboard `{ conversationId, message, source }` |
+| `agentBotDecisions` | conversation id | Latest routing decision `{ classified, routingLabels, action, reason }` (dry-run `would-*` outcomes are not recorded) |
+| `sentReplies` | auto | Replies actually sent to customers `{ conversationId, message, source }`; `source` ∈ `dashboard`, `agent-bot`, `agent-bot-holding` |
 | `responderGuardEvents` | auto | Every time the AgentBot [reply safety guard](agent-bot.md#reply-safety-guard) intervened `{ conversationId, outcome, source, violations, blockedText? }`. `outcome` ∈ blocked, preamble-stripped, missing-send-reply-tool, holding-fallback |
 
 These power future reporting (e.g. the planned AI Usage Reports in the [Admin Control Dashboard](admin-dashboard.md)).

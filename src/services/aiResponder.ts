@@ -17,13 +17,24 @@ import {
   resolveConversation,
 } from './chatwootConversation.js';
 import { cancelActiveSubscriptionsByEmail } from './skio.js';
-import { generateCompletion } from './claude.js';
+import {
+  ADAPTIVE_THINKING,
+  cachedSystem,
+  effortConfig,
+  generateCompletion,
+} from './claude.js';
 import {
   recordAiUsage,
   recordAgentBotDecision,
   recordResponderGuardEvent,
+  recordSentReply,
 } from './aiAudit.js';
 import { getAiConfig } from './appConfig.js';
+import {
+  gatherCustomerImages,
+  toUserContent,
+  type CustomerImage,
+} from './attachments.js';
 import type { AiConfig } from '../types/config.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
 import {
@@ -37,6 +48,19 @@ const client = new Anthropic({ apiKey: env.anthropicApiKey });
 
 const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
 
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Everything needed to act on (reply to / hand off) one conversation. */
+interface ConversationTarget {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+  ctx: PromptContext;
+  images: CustomerImage[];
+}
+
 /**
  * Crafts a short, context-aware holding reply for the hard-escalation path
  * (where no responder agent runs), vetted for customer safety. Falls back to a
@@ -47,6 +71,7 @@ async function generateHoldingReply(ctx: PromptContext): Promise<VettedHoldingRe
   const reply = await generateCompletion(cfg.holdingSystemPrompt, buildPrompt(ctx), {
     model: cfg.holdingModel,
     maxTokens: cfg.holdingMaxTokens,
+    effort: cfg.holdingEffort,
     meta: { kind: 'holding', conversationId: ctx.conversationId },
   });
 
@@ -74,40 +99,77 @@ async function sendHoldingReply(
     });
   }
   await sendReply(conversationId, holding.content);
+  void recordSentReply({
+    conversationId,
+    message: holding.content,
+    source: 'agent-bot-holding',
+  });
 }
 
 /**
- * Hard-escalates a conversation: sends a contextual holding reply, moves it to
- * `open` (visible to humans), and triggers an AI draft for the human agent.
+ * Hands a conversation to a human: moves it to `open`, sends a holding reply
+ * (when enabled), and posts an escalation draft for the agent.
+ *
+ * The status change happens FIRST and every step is independent, so a failure
+ * in the holding reply or draft (or a crash mid-way) can never leave the
+ * conversation stuck in `pending`, where agents don't see it.
+ *
+ * `agentHoldingReply` is the responder agent's tailored holding reply (tool
+ * escalation); when omitted, one is generated.
  */
-async function hardEscalate(params: {
-  conversationId: number;
-  contactId: number;
-  email?: string | null;
-  ctx: PromptContext;
-  reason: string;
-}): Promise<void> {
-  const { conversationId, contactId, email, ctx, reason } = params;
-  const holdingReplyEnabled = (await getAiConfig()).holdingReplyEnabled;
+async function escalateToHuman(
+  target: ConversationTarget,
+  reason: string,
+  agentHoldingReply?: string,
+): Promise<void> {
+  const { conversationId, contactId, email, ctx, images } = target;
+  const cfg = await getAiConfig();
+
   try {
-    // Holding reply is optional (holdingReplyEnabled). When disabled, the bot
-    // stays silent and just hands the conversation to a human.
-    if (holdingReplyEnabled) {
-      await sendHoldingReply(conversationId, await generateHoldingReply(ctx));
-    }
     await setConversationStatus(conversationId, 'open');
-    await postAiDraft({ conversationId, contactId, email, escalation: true });
-    logger.info('Hard-escalated conversation', {
-      conversationId,
-      reason,
-      holdingReply: holdingReplyEnabled,
-    });
   } catch (err) {
-    logger.error('Hard escalation failed', {
+    logger.error('Escalation: failed to open conversation', {
       conversationId,
-      error: err instanceof Error ? err.message : String(err),
+      error: errMessage(err),
     });
   }
+
+  if (cfg.holdingReplyEnabled) {
+    try {
+      const holding =
+        agentHoldingReply !== undefined
+          ? vetHoldingReply(agentHoldingReply, ctx.customerName)
+          : await generateHoldingReply(ctx);
+      await sendHoldingReply(conversationId, holding);
+    } catch (err) {
+      logger.error('Escalation: failed to send holding reply', {
+        conversationId,
+        error: errMessage(err),
+      });
+    }
+  }
+
+  try {
+    await postAiDraft({
+      conversationId,
+      contactId,
+      email,
+      escalation: true,
+      context: ctx,
+      images,
+    });
+  } catch (err) {
+    logger.error('Escalation: failed to post escalation draft', {
+      conversationId,
+      error: errMessage(err),
+    });
+  }
+
+  logger.info('Escalated conversation to a human', {
+    conversationId,
+    reason,
+    holdingReply: cfg.holdingReplyEnabled,
+  });
 }
 
 const ESCALATE_TOOL_DESC =
@@ -128,9 +190,8 @@ const SEND_REPLY_TOOL_DESC =
   'sign-off. It must never contain your reasoning, case or step numbers, label ' +
   'or tool names, references to your instructions, or any sentence about the ' +
   'customer written in the third person. Any text you write outside this ' +
-  'argument is discarded and never reaches the customer, so use it for thinking ' +
-  'if you need to. Call this once when you are ready to answer; after calling ' +
-  'it you are done.';
+  'argument is discarded and never reaches the customer. Call this once when ' +
+  'you are ready to answer; after calling it you are done.';
 
 const CANCEL_TOOL_DESC =
   "Cancel the customer's active Skio subscription(s) and stop all future " +
@@ -143,47 +204,18 @@ const CANCEL_TOOL_DESC =
   'success, call `send_reply` with a short message confirming the cancellation. ' +
   'Never claim a cancellation without calling this tool first.';
 
+interface ResponderToolHandlers {
+  sendReply: (message: string) => Promise<string>;
+  escalate: (input: { reason: string; holding_reply: string }) => Promise<string>;
+  cancelSubscription: () => Promise<string>;
+}
+
 /**
- * Runs the autonomous responder agent (Sonnet, tool-runner) for an eligible
- * conversation. Sends the agent's final reply and resolves the conversation,
- * unless the agent escalated (in which case the holding reply + handoff were
- * already done by the escalate tool).
+ * The responder's tool set. Shared by the live run and the prompt tester so the
+ * two can never drift; only the handlers differ. `cancel_subscription` is only
+ * exposed when the conversation is a sub-cancel.
  */
-async function runResponderAgent(params: {
-  conversationId: number;
-  contactId: number;
-  email?: string | null;
-  ctx: PromptContext;
-  labels: ClassificationLabel[];
-  // When true (backfill), the agent must not escalate: if it tries to (or fails
-  // to produce a reply), the conversation is left completely untouched — no
-  // holding reply, no draft, no status change. Returns 'skipped' in that case.
-  noEscalate?: boolean;
-}): Promise<'responded' | 'escalated' | 'skipped'> {
-  const { conversationId, contactId, email, ctx, labels, noEscalate } = params;
-  const cfg = await getAiConfig();
-
-  if (!cfg.responderSystemPrompt) {
-    if (noEscalate) {
-      logger.warn('Responder prompt empty — skipping (no escalation)', { conversationId });
-      return 'skipped';
-    }
-    logger.warn('Responder prompt empty — escalating instead', { conversationId });
-    await hardEscalate({
-      conversationId,
-      contactId,
-      email,
-      ctx,
-      reason: 'responder prompt not configured',
-    });
-    return 'escalated';
-  }
-
-  let escalated = false;
-  // Set by the send_reply tool. The message is sent AFTER the loop ends so the
-  // conversation can only ever receive one outbound message per run.
-  let pendingReply: string | null = null;
-
+function buildResponderTools(labels: ClassificationLabel[], handlers: ResponderToolHandlers) {
   const sendReplyTool = betaZodTool({
     name: 'send_reply',
     description: SEND_REPLY_TOOL_DESC,
@@ -194,10 +226,7 @@ async function runResponderAgent(params: {
           'The customer-facing message body only (greeting + reply, NO sign-off, no reasoning or internal commentary).',
         ),
     }),
-    run: async ({ message }) => {
-      pendingReply = message;
-      return 'Reply accepted and will be sent. You are done; do not write any further message.';
-    },
+    run: ({ message }) => handlers.sendReply(message),
   });
 
   const escalateTool = betaZodTool({
@@ -213,50 +242,117 @@ async function runResponderAgent(params: {
           'The short, friendly, context-aware message body to send to the customer now (greeting + message only, NO sign-off). Tells them a team member will be in touch shortly. Never promises a specific outcome.',
         ),
     }),
-    run: async ({ reason, holding_reply }) => {
-      escalated = true;
-      // Backfill skip mode: the agent wanted to escalate, but we leave the
-      // conversation completely untouched (no reply, no draft, no status change).
-      if (noEscalate) {
-        logger.info('Responder wanted to escalate — skipping (backfill, no escalation)', {
-          conversationId,
-          reason,
-        });
-        return 'Escalation is disabled in this run. Do NOT send any reply or message. You are done.';
-      }
-      try {
-        // Holding reply is optional (holdingReplyEnabled). When disabled, the
-        // bot stays silent and just hands the conversation to a human.
-        if (cfg.holdingReplyEnabled) {
-          await sendHoldingReply(
-            conversationId,
-            vetHoldingReply(holding_reply, ctx.customerName),
-          );
-        }
-        await setConversationStatus(conversationId, 'open');
-        await postAiDraft({ conversationId, contactId, email, escalation: true });
-      } catch (err) {
-        logger.error('Escalation tool actions failed', {
-          conversationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-      logger.info('Responder escalated conversation', {
-        conversationId,
-        reason,
-        holdingReply: cfg.holdingReplyEnabled,
-      });
-      return cfg.holdingReplyEnabled
-        ? 'Conversation escalated to a human and the holding reply was sent. You are done; do not write any further message.'
-        : 'Conversation escalated to a human (no holding reply sent). You are done; do not write any further message.';
-    },
+    run: (input) => handlers.escalate(input),
   });
 
   const cancelTool = betaZodTool({
     name: 'cancel_subscription',
     description: CANCEL_TOOL_DESC,
     inputSchema: z.object({}),
-    run: async () => {
+    run: () => handlers.cancelSubscription(),
+  });
+
+  return labels.includes('sub-cancel')
+    ? [sendReplyTool, escalateTool, cancelTool]
+    : [sendReplyTool, escalateTool];
+}
+
+/**
+ * Runs the responder tool loop and returns the final message plus token usage
+ * summed across every turn of the loop.
+ */
+async function runResponderLoop(
+  cfg: AiConfig,
+  tools: ReturnType<typeof buildResponderTools>,
+  content: string | Anthropic.ContentBlockParam[],
+): Promise<{ finalMessage: Anthropic.Beta.BetaMessage; inputTokens: number; outputTokens: number }> {
+  const runner = client.beta.messages.toolRunner({
+    model: cfg.responderModel,
+    max_tokens: cfg.responderMaxTokens,
+    max_iterations: cfg.responderMaxIterations,
+    thinking: ADAPTIVE_THINKING,
+    output_config: effortConfig(cfg.responderEffort),
+    // One tool call per turn, as the prompt requires: the agent can't confirm a
+    // cancellation in the same turn it requests one.
+    tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+    system: cachedSystem(cfg.responderSystemPrompt),
+    tools,
+    messages: [{ role: 'user', content }],
+  });
+
+  let finalMessage: Anthropic.Beta.BetaMessage | null = null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for await (const message of runner) {
+    finalMessage = message;
+    inputTokens += message.usage.input_tokens;
+    outputTokens += message.usage.output_tokens;
+  }
+  if (!finalMessage) throw new Error('Responder tool loop produced no message');
+  return { finalMessage, inputTokens, outputTokens };
+}
+
+function finalText(message: Anthropic.Beta.BetaMessage): string {
+  return message.content
+    .map((b) => (b.type === 'text' ? b.text : ''))
+    .join('')
+    .trim();
+}
+
+interface ResponderOutcome {
+  action: 'responded' | 'escalated' | 'skipped';
+  reason: string | null;
+}
+
+/**
+ * Runs the autonomous responder agent for an eligible conversation. Sends the
+ * agent's vetted reply and resolves the conversation, or hands it to a human.
+ *
+ * Side effects wait until the loop ends (except `cancel_subscription`, whose
+ * result the agent needs): a reply is sent once, and an escalation keeps the
+ * agent's tailored holding reply even if the loop later errors.
+ *
+ * `noEscalate` (backfill): wherever the live flow would escalate, the
+ * conversation is left completely untouched and the outcome is 'skipped'.
+ */
+async function runResponderAgent(
+  target: ConversationTarget & { labels: ClassificationLabel[]; noEscalate?: boolean },
+): Promise<ResponderOutcome> {
+  const { conversationId, contactId, ctx, images, labels, noEscalate } = target;
+  const cfg = await getAiConfig();
+
+  const handOff = async (reason: string, agentHoldingReply?: string): Promise<ResponderOutcome> => {
+    if (noEscalate) {
+      logger.info('Responder did not answer — skipping (backfill, no escalation)', {
+        conversationId,
+        reason,
+      });
+      return { action: 'skipped', reason };
+    }
+    await escalateToHuman(target, reason, agentHoldingReply);
+    return { action: 'escalated', reason };
+  };
+
+  if (!cfg.responderSystemPrompt) return handOff('responder prompt not configured');
+
+  // Written by the tool handlers during the loop, acted on after it.
+  const state: {
+    reply: string | null;
+    escalation: { reason: string; holding_reply: string } | null;
+  } = { reply: null, escalation: null };
+
+  const tools = buildResponderTools(labels, {
+    sendReply: async (message) => {
+      state.reply = message;
+      return 'Reply accepted and will be sent. You are done; do not write any further message.';
+    },
+    escalate: async (input) => {
+      state.escalation = input;
+      return noEscalate
+        ? 'Escalation is disabled in this run. Do NOT send any reply or message. You are done.'
+        : 'The conversation will be handed to a human. You are done; do not write any further message.';
+    },
+    cancelSubscription: async () => {
       const lookupEmail = ctx.customerEmail;
       if (!lookupEmail) {
         return 'No email on file to look up the subscription. Use send_reply to ask the customer for the email used at checkout, or escalate.';
@@ -272,137 +368,101 @@ async function runResponderAgent(params: {
         }
         return 'Active subscription(s) were found but the cancellation failed. Do not claim success — escalate to a human.';
       } catch (err) {
-        logger.warn('cancel_subscription tool failed', {
-          conversationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        logger.warn('cancel_subscription tool failed', { conversationId, error: errMessage(err) });
         return 'The cancellation could not be completed due to an internal error. Do not claim success — escalate to a human.';
       }
     },
   });
 
-  // Only expose the cancellation tool when the conversation is a sub-cancel.
-  const tools = labels.includes('sub-cancel')
-    ? [sendReplyTool, escalateTool, cancelTool]
-    : [sendReplyTool, escalateTool];
-
+  let freeText: string;
   try {
-    const finalMessage = await client.beta.messages.toolRunner({
-      model: cfg.responderModel,
-      max_tokens: cfg.responderMaxTokens,
-      max_iterations: cfg.responderMaxIterations,
-      system: cfg.responderSystemPrompt,
-      tools,
-      messages: [{ role: 'user', content: buildPrompt(ctx) }],
-    });
-
-    // Coarse usage record (final turn) for the autonomous responder run.
+    const run = await runResponderLoop(cfg, tools, toUserContent(buildPrompt(ctx), images));
+    freeText = finalText(run.finalMessage);
     void recordAiUsage({
       kind: 'responder',
       model: cfg.responderModel,
-      inputTokens: finalMessage.usage?.input_tokens,
-      outputTokens: finalMessage.usage?.output_tokens,
+      inputTokens: run.inputTokens,
+      outputTokens: run.outputTokens,
       conversationId,
       contactId,
     });
-
-    // The escalate tool fired. In backfill skip mode this means "leave untouched".
-    // Checked before any pending reply: an escalated conversation already got its
-    // holding reply and must not also receive an answer.
-    if (escalated) return noEscalate ? 'skipped' : 'escalated';
-
-    // Preferred path: the message the agent passed to `send_reply`. Free-form
-    // text from the final turn is only a fallback for when the agent answered
-    // without the tool — it is the path that leaked reasoning in #7775, so it
-    // gets the same vetting.
-    const freeText = finalMessage.content
-      .map((b) => (b.type === 'text' ? b.text : ''))
-      .join('')
-      .trim();
-    const source = pendingReply !== null ? 'send_reply' : 'free-text';
-    const candidate = pendingReply ?? freeText;
-
-    if (!candidate) {
-      if (noEscalate) {
-        logger.warn('Responder produced no final reply — skipping (no escalation)', { conversationId });
-        return 'skipped';
-      }
-      logger.warn('Responder produced no final reply — escalating', { conversationId });
-      await hardEscalate({
-        conversationId,
-        contactId,
-        email,
-        ctx,
-        reason: 'no final reply produced',
-      });
-      return 'escalated';
-    }
-
-    // Last line of defence: internal reasoning, prompt scaffolding or agent
-    // notes must never reach a customer. A rejected reply is escalated to a
-    // human instead of being sent.
-    const vetted = vetResponderReply(candidate);
-
-    if (!vetted.ok) {
-      logger.error('Responder reply blocked by the customer-safety guard', {
-        conversationId,
-        source,
-        violations: vetted.violations,
-      });
-      void recordResponderGuardEvent({
-        conversationId,
-        outcome: 'blocked',
-        source,
-        violations: vetted.violations,
-        blockedText: candidate,
-      });
-      if (noEscalate) return 'skipped';
-      await hardEscalate({
-        conversationId,
-        contactId,
-        email,
-        ctx,
-        reason: `reply blocked by safety guard (${vetted.violations.join(', ')})`,
-      });
-      return 'escalated';
-    }
-
-    if (vetted.strippedPreamble || source === 'free-text') {
-      logger.warn('Responder reply needed cleanup before sending', {
-        conversationId,
-        source,
-        strippedPreamble: vetted.strippedPreamble,
-      });
-      void recordResponderGuardEvent({
-        conversationId,
-        outcome: vetted.strippedPreamble ? 'preamble-stripped' : 'missing-send-reply-tool',
-        source,
-        violations: [],
-      });
-    }
-
-    await sendReply(conversationId, vetted.content);
-    await addConversationLabels(conversationId, ['ai-response']);
-    await resolveConversation(conversationId);
-    logger.info('Responder replied and resolved conversation', { conversationId, source });
-    return 'responded';
   } catch (err) {
-    logger.error('Responder agent run failed', {
-      conversationId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    if (noEscalate) return 'skipped';
-    if (!escalated) {
-      await hardEscalate({
-        conversationId,
-        contactId,
-        email,
-        ctx,
-        reason: 'responder agent error',
-      });
+    logger.error('Responder agent run failed', { conversationId, error: errMessage(err) });
+    if (state.escalation) {
+      return handOff(`agent: ${state.escalation.reason}`, state.escalation.holding_reply);
     }
-    return 'escalated';
+    return handOff('responder agent error');
   }
+
+  // An escalation wins over any reply: the customer must not get both.
+  if (state.escalation) {
+    return handOff(`agent: ${state.escalation.reason}`, state.escalation.holding_reply);
+  }
+
+  // Preferred path: the message the agent passed to `send_reply`. Free-form
+  // text from the final turn is only a fallback for when the agent answered
+  // without the tool — it is the path that leaked reasoning in #7775, so it
+  // gets the same vetting.
+  const source = state.reply !== null ? 'send_reply' : 'free-text';
+  const candidate = state.reply ?? freeText;
+
+  if (!candidate) return handOff('no final reply produced');
+
+  // Last line of defence: internal reasoning, prompt scaffolding or agent
+  // notes must never reach a customer. A rejected reply goes to a human.
+  const vetted = vetResponderReply(candidate);
+
+  if (!vetted.ok) {
+    logger.error('Responder reply blocked by the customer-safety guard', {
+      conversationId,
+      source,
+      violations: vetted.violations,
+    });
+    void recordResponderGuardEvent({
+      conversationId,
+      outcome: 'blocked',
+      source,
+      violations: vetted.violations,
+      blockedText: candidate,
+    });
+    return handOff(`reply blocked by safety guard (${vetted.violations.join(', ')})`);
+  }
+
+  if (vetted.strippedPreamble || source === 'free-text') {
+    logger.warn('Responder reply needed cleanup before sending', {
+      conversationId,
+      source,
+      strippedPreamble: vetted.strippedPreamble,
+    });
+    void recordResponderGuardEvent({
+      conversationId,
+      outcome: vetted.strippedPreamble ? 'preamble-stripped' : 'missing-send-reply-tool',
+      source,
+      violations: [],
+    });
+  }
+
+  try {
+    await sendReply(conversationId, vetted.content);
+  } catch (err) {
+    logger.error('Failed to send responder reply', { conversationId, error: errMessage(err) });
+    return handOff('sending the reply failed');
+  }
+  void recordSentReply({ conversationId, message: vetted.content, source: 'agent-bot' });
+
+  // The customer has their answer. Bookkeeping failures from here on must not
+  // escalate, which would follow the answer with a contradictory holding reply.
+  await addConversationLabels(conversationId, ['ai-response']);
+  try {
+    await resolveConversation(conversationId);
+  } catch (err) {
+    logger.error('Reply sent but failed to resolve conversation', {
+      conversationId,
+      error: errMessage(err),
+    });
+  }
+  logger.info('Responder replied and resolved conversation', { conversationId, source });
+  return { action: 'responded', reason: null };
 }
 
 export interface ResponderReplayResult {
@@ -428,94 +488,54 @@ export interface ResponderReplayResult {
 
 /**
  * Runs the responder tool loop for the admin prompt tester with STUBBED tools:
- * the escalate / cancel tools record their invocation and return a canned
- * string but perform NO Chatwoot/Skio/side-effecting actions. Returns the exact
- * prompt, the candidate reply text, and any tool calls the agent made.
+ * every tool records its invocation and returns a canned string but performs
+ * NO Chatwoot/Skio/side-effecting actions. Returns the exact prompt, the
+ * candidate reply text, and any tool calls the agent made.
  */
 export async function runResponderReplay(params: {
   ctx: PromptContext;
   labels: ClassificationLabel[];
   cfg: AiConfig;
+  images?: CustomerImage[];
 }): Promise<ResponderReplayResult> {
-  const { ctx, labels, cfg } = params;
+  const { ctx, labels, cfg, images = [] } = params;
   const userPrompt = buildPrompt(ctx);
   const toolInvocations: { name: string; input: unknown }[] = [];
-  let replyMessage: string | null = null;
+  const state: { reply: string | null } = { reply: null };
 
-  const sendReplyTool = betaZodTool({
-    name: 'send_reply',
-    description: SEND_REPLY_TOOL_DESC,
-    inputSchema: z.object({
-      message: z
-        .string()
-        .describe(
-          'The customer-facing message body only (greeting + reply, NO sign-off, no reasoning or internal commentary).',
-        ),
-    }),
-    run: async (input) => {
-      toolInvocations.push({ name: 'send_reply', input });
-      replyMessage = input.message;
+  const tools = buildResponderTools(labels, {
+    sendReply: async (message) => {
+      toolInvocations.push({ name: 'send_reply', input: { message } });
+      state.reply = message;
       return 'Reply accepted (REPLAY: nothing sent). You are done; do not write any further message.';
     },
-  });
-
-  const escalateTool = betaZodTool({
-    name: 'escalate_to_human',
-    description: ESCALATE_TOOL_DESC,
-    inputSchema: z.object({
-      reason: z.string().describe('Brief internal reason for escalating.'),
-      holding_reply: z
-        .string()
-        .describe('The short holding message that would be sent to the customer.'),
-    }),
-    run: async (input) => {
+    escalate: async (input) => {
       toolInvocations.push({ name: 'escalate_to_human', input });
       return 'Conversation escalated to a human (REPLAY: no actions performed). You are done; do not write any further message.';
     },
-  });
-
-  const cancelTool = betaZodTool({
-    name: 'cancel_subscription',
-    description: CANCEL_TOOL_DESC,
-    inputSchema: z.object({}),
-    run: async (input) => {
-      toolInvocations.push({ name: 'cancel_subscription', input });
+    cancelSubscription: async () => {
+      toolInvocations.push({ name: 'cancel_subscription', input: {} });
       return 'Subscription cancelled (REPLAY: no actions performed). Confirm the cancellation to the customer.';
     },
   });
 
-  const tools = labels.includes('sub-cancel')
-    ? [sendReplyTool, escalateTool, cancelTool]
-    : [sendReplyTool, escalateTool];
-  const toolNames = labels.includes('sub-cancel')
-    ? ['send_reply', 'escalate_to_human', 'cancel_subscription']
-    : ['send_reply', 'escalate_to_human'];
-
-  const finalMessage = await client.beta.messages.toolRunner({
-    model: cfg.responderModel,
-    max_tokens: cfg.responderMaxTokens,
-    max_iterations: cfg.responderMaxIterations,
-    system: cfg.responderSystemPrompt,
+  const { finalMessage, inputTokens, outputTokens } = await runResponderLoop(
+    cfg,
     tools,
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-
-  const text = finalMessage.content
-    .map((b) => (b.type === 'text' ? b.text : ''))
-    .join('')
-    .trim();
+    toUserContent(userPrompt, images),
+  );
+  const text = finalText(finalMessage);
 
   // Mirror the live send path so the tester previews the real outcome.
-  const candidate: string = replyMessage ?? text;
-  const vetted = vetResponderReply(candidate);
+  const vetted = vetResponderReply(state.reply ?? text);
 
   return {
     systemPrompt: cfg.responderSystemPrompt,
     userPrompt,
     model: cfg.responderModel,
-    toolNames,
+    toolNames: tools.map((t) => t.name),
     text,
-    replyMessage,
+    replyMessage: state.reply,
     guard: {
       ok: vetted.ok,
       violations: vetted.violations,
@@ -523,10 +543,7 @@ export async function runResponderReplay(params: {
       wouldSend: vetted.content,
     },
     toolInvocations,
-    usage: {
-      inputTokens: finalMessage.usage?.input_tokens,
-      outputTokens: finalMessage.usage?.output_tokens,
-    },
+    usage: { inputTokens, outputTokens },
   };
 }
 
@@ -534,6 +551,7 @@ export type AgentBotAction =
   | 'responded'
   | 'escalated'
   | 'skipped'
+  | 'failed'
   | 'would-respond'
   | 'would-escalate'
   | 'would-skip';
@@ -543,6 +561,8 @@ export interface AgentBotRunResult {
   classified: ClassificationLabel[] | null;
   routingLabels: ClassificationLabel[];
   action: AgentBotAction;
+  /** Why it escalated / skipped / failed; null when answered. */
+  reason: string | null;
 }
 
 /**
@@ -556,6 +576,7 @@ function finish(result: AgentBotRunResult): AgentBotRunResult {
       classified: result.classified,
       routingLabels: result.routingLabels,
       action: result.action,
+      reason: result.reason,
     });
   }
   return result;
@@ -569,11 +590,11 @@ function finish(result: AgentBotRunResult): AgentBotRunResult {
  * backfill script.
  *
  * When `dryRun` is true, NOTHING is mutated (no label writes, no replies, no
- * status changes, no drafts) — it only classifies and reports the routing
- * decision.
+ * status changes, no drafts, no contact linking) — it only classifies and
+ * reports the routing decision.
  *
  * When `backfill` is true, the flow NEVER escalates: only conversations whose
- * routing labels are a non-empty subset of {sub-cancel, order-status} get a
+ * routing labels are a non-empty subset of `backfillAutoRespondLabels` get a
  * response; EVERYTHING else is skipped entirely (no holding reply, no draft, no
  * status change). Used by the one-time backlog script.
  */
@@ -588,16 +609,18 @@ export async function processAgentBotConversation(
   const autoRespondSet = new Set<string>(cfg.autoRespondLabels);
   const backfillSet = new Set<string>(cfg.backfillAutoRespondLabels);
 
-  // 1. Context + Shopify matching.
-  const { context: ctx } = await gatherContextWithMatching({
-    conversationId,
-    contactId,
-    email,
-  });
+  // 1. Context + Shopify matching, and customer images (fetched once, shared by
+  //    the classifier, the responder and any escalation draft).
+  const { context: ctx } = await gatherContextWithMatching(
+    { conversationId, contactId, email },
+    { dryRun },
+  );
+  const images = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
+  const target: ConversationTarget = { conversationId, contactId, email, ctx, images };
 
   // 2. Classify against current labels and merge (add-only). Skip writes on dry-run.
   const currentLabels = await getConversationLabels(conversationId);
-  const classified = await classifyConversation(ctx, currentLabels);
+  const classified = await classifyConversation(ctx, currentLabels, images);
   if (!dryRun && classified && classified.length > 0) {
     await addConversationLabels(conversationId, classified);
   }
@@ -607,83 +630,61 @@ export async function processAgentBotConversation(
   const routingLabels = Array.from(
     new Set<string>([...currentLabels, ...(classified ?? [])]),
   ).filter((l): l is ClassificationLabel => CLASSIFICATION_LABEL_SET.has(l));
+  const result = { conversationId, classified, routingLabels };
 
   if (backfill) {
-    // Strict: only auto-respond to clean sub-cancel / order-status tickets.
-    // Anything else (other, refund, mixed, classification failure) is skipped
-    // and left completely untouched.
+    // Strict: only auto-respond to clean backfill-eligible tickets. Anything
+    // else (other, refund, mixed, classification failure) is skipped and left
+    // completely untouched.
     const eligible =
       classified !== null &&
       routingLabels.length > 0 &&
       routingLabels.every((l) => backfillSet.has(l));
+    const reason = eligible ? null : 'not backfill-eligible';
 
     if (dryRun) {
-      return finish({
-        conversationId,
-        classified,
-        routingLabels,
-        action: eligible ? 'would-respond' : 'would-skip',
-      });
+      return finish({ ...result, action: eligible ? 'would-respond' : 'would-skip', reason });
     }
+    if (!eligible) return finish({ ...result, action: 'skipped', reason });
 
-    if (!eligible) {
-      return finish({ conversationId, classified, routingLabels, action: 'skipped' });
-    }
-
-    const outcome = await runResponderAgent({
-      conversationId,
-      contactId,
-      email,
-      ctx,
-      labels: routingLabels,
-      noEscalate: true,
-    });
-    return finish({ conversationId, classified, routingLabels, action: outcome });
+    const outcome = await runResponderAgent({ ...target, labels: routingLabels, noEscalate: true });
+    return finish({ ...result, ...outcome });
   }
 
   // --- Live flow ---
   // 4. Hard-escalate if classification failed, produced nothing usable, or any
   //    label falls outside the auto-handleable set.
-  const mustEscalate =
-    classified === null ||
-    routingLabels.length === 0 ||
-    routingLabels.some((l) => !autoRespondSet.has(l));
+  const blocking = routingLabels.filter((l) => !autoRespondSet.has(l));
+  const escalateReason =
+    classified === null
+      ? 'classification failed'
+      : routingLabels.length === 0
+        ? 'no routing labels'
+        : blocking.length > 0
+          ? `labels not auto-respondable: ${blocking.join(', ')}`
+          : null;
 
   if (dryRun) {
     return finish({
-      conversationId,
-      classified,
-      routingLabels,
-      action: mustEscalate ? 'would-escalate' : 'would-respond',
+      ...result,
+      action: escalateReason ? 'would-escalate' : 'would-respond',
+      reason: escalateReason,
     });
   }
 
-  if (mustEscalate) {
-    await hardEscalate({
-      conversationId,
-      contactId,
-      email,
-      ctx,
-      reason: `labels=[${routingLabels.join(', ')}] classified=${classified === null ? 'failed' : 'ok'}`,
-    });
-    return finish({ conversationId, classified, routingLabels, action: 'escalated' });
+  if (escalateReason) {
+    await escalateToHuman(target, escalateReason);
+    return finish({ ...result, action: 'escalated', reason: escalateReason });
   }
 
-  // 5. Eligible (subset of sub-cancel / order-status / other) → responder agent.
-  const outcome = await runResponderAgent({
-    conversationId,
-    contactId,
-    email,
-    ctx,
-    labels: routingLabels,
-  });
-
-  return finish({ conversationId, classified, routingLabels, action: outcome });
+  // 5. Eligible → responder agent.
+  const outcome = await runResponderAgent({ ...target, labels: routingLabels });
+  return finish({ ...result, ...outcome });
 }
 
 /**
  * Entry point for the AgentBot webhook. Runs on pending conversations.
- * Best-effort: must never throw (the webhook has already replied 200).
+ * Must never throw (the webhook has already replied 200).
  */
 export async function handleAgentBotMessage(
   payload: ChatwootWebhookPayload,
@@ -697,5 +698,37 @@ export async function handleAgentBotMessage(
     contactId,
   });
 
-  await processAgentBotConversation({ conversationId, contactId, email });
+  try {
+    await processAgentBotConversation({ conversationId, contactId, email });
+  } catch (err) {
+    // The pipeline died before deciding (e.g. a Chatwoot/Shopify fetch failed).
+    // Never leave the conversation pending and unseen: open it for a human and
+    // try a plain draft.
+    const reason = `pipeline error: ${errMessage(err)}`;
+    logger.error('AgentBot pipeline failed — opening conversation for a human', {
+      conversationId,
+      error: errMessage(err),
+    });
+    void recordAgentBotDecision({
+      conversationId,
+      classified: null,
+      routingLabels: [],
+      action: 'failed',
+      reason,
+    });
+    try {
+      await setConversationStatus(conversationId, 'open');
+    } catch (openErr) {
+      logger.error('Failed to open conversation after AgentBot pipeline error', {
+        conversationId,
+        error: errMessage(openErr),
+      });
+    }
+    await postAiDraft({ conversationId, contactId, email }).catch((draftErr) => {
+      logger.warn('Fallback draft after AgentBot pipeline error failed', {
+        conversationId,
+        error: errMessage(draftErr),
+      });
+    });
+  }
 }

@@ -10,6 +10,7 @@
  * the AI service modules without creating import cycles.
  */
 import { env } from './env.js';
+import type { AiConfig } from '../types/config.js';
 
 // --- Prompts (draft + responder prompts live in env/prompt files already) ---
 
@@ -37,7 +38,9 @@ RULES:
   - "Where is my order? Btw the discount code is also not working" -> ["order-status", "discount-issue"].
 - Distinguish carefully between "sub-cancel" (stop future billing) and "refund" (money back / undo an order). A customer can want both.
 - You will be shown the labels already on the conversation. Only return labels that genuinely apply based on the full conversation. It is fine to repeat existing applicable labels; the system only ever ADDS labels, never removes them. If no new label is warranted beyond what already applies, just return the applicable label(s).
-- Base your decision on the customer's messages (intent), not on agent replies.`;
+- Base your decision on the customer's messages (intent), not on agent replies. Weigh the most recent customer message most heavily: if it raises a new request, its label must be included.
+- If the latest customer message raises no new request (e.g. "thanks", "ok") or is an automatic reply (out-of-office, auto-acknowledgement), do not invent an intent: return only the labels that still apply, or "other".
+- Customer photos may be attached to the conversation. Use them (e.g. a photo of damaged gum or packaging is "product-defect").`;
 
 export const DEFAULT_SUMMARY_SYSTEM_PROMPT = `You are an assistant that writes concise internal summaries of a customer for support agents at Scandi, an e-commerce gum brand. You receive the customer's profile, order history, and their full support conversation history.
 
@@ -94,10 +97,11 @@ export const DEFAULT_BACKFILL_AUTO_RESPOND_LABELS = ['sub-cancel', 'order-status
 
 // --- Models ---
 
-export const SUMMARY_MODEL_DEFAULT = 'claude-haiku-4-5';
+/** Default model for every AI task (overridable per task via env/admin config). */
+export const DEFAULT_MODEL = 'claude-sonnet-5';
 
 /** The full default AI config, derived from env + the constants above. */
-export function buildDefaultAiConfig() {
+export function buildDefaultAiConfig(): AiConfig {
   return {
     // Prompts
     draftSystemPrompt: env.claudeSystemPrompt,
@@ -110,22 +114,30 @@ export function buildDefaultAiConfig() {
     draftModel: env.claudeModel,
     responderModel: env.claudeModel,
     classifierModel: env.claudeClassifierModel,
-    summaryModel: SUMMARY_MODEL_DEFAULT,
+    summaryModel: DEFAULT_MODEL,
     resolverModel: env.claudeModel,
     holdingModel: env.claudeClassifierModel,
+    // Effort: routing decisions get enough thinking to be accurate; short,
+    // templated outputs stay cheap and fast.
+    draftEffort: 'high',
+    responderEffort: 'high',
+    classifierEffort: 'medium',
+    summaryEffort: 'low',
+    resolverEffort: 'low',
+    holdingEffort: 'low',
     // Routing
     autoRespondLabels: [...DEFAULT_AUTO_RESPOND_LABELS],
     backfillAutoRespondLabels: [...DEFAULT_BACKFILL_AUTO_RESPOND_LABELS],
     holdingReplyEnabled: env.agentBotHoldingReplyEnabled,
-    // Numeric knobs
-    draftMaxTokens: 2048,
-    classifierMaxTokens: 400,
-    summaryMaxTokens: 1500,
-    holdingMaxTokens: 400,
-    // Headroom for a short thinking pass plus the send_reply tool call.
-    responderMaxTokens: 2048,
+    // Numeric knobs. `max_tokens` covers adaptive thinking + the answer, so
+    // every limit leaves room for a thinking pass before the output.
+    draftMaxTokens: 8000,
+    classifierMaxTokens: 4000,
+    summaryMaxTokens: 8000,
+    holdingMaxTokens: 2000,
+    responderMaxTokens: 8000,
     responderMaxIterations: 5,
-    resolverMaxTokens: 1024,
+    resolverMaxTokens: 4000,
     resolverMaxIterations: 4,
   };
 }

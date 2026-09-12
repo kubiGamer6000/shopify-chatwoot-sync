@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import { generateStructured } from './claude.js';
 import { recordClassification } from './aiAudit.js';
 import { getAiConfig } from './appConfig.js';
+import { toUserContent, type CustomerImage } from './attachments.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
 import type { AiConfig } from '../types/config.js';
 
@@ -53,24 +54,27 @@ const ClassificationSchema = z.object({
 });
 
 /**
- * Classifies a conversation into one or more labels using a cheap model. Returns
- * the applicable classification labels, or null on failure (callers should treat
- * a null/empty result as "escalate to be safe").
+ * Classifies a conversation into one or more labels. Customer images, when
+ * provided, are shown to the model (photo-only messages are otherwise
+ * unclassifiable). Returns the applicable classification labels, or null on
+ * failure (callers should treat a null/empty result as "escalate to be safe").
  */
 export async function classifyConversation(
   ctx: PromptContext,
   currentLabels: string[],
+  images: CustomerImage[] = [],
 ): Promise<ClassificationLabel[] | null> {
   const cfg = await getAiConfig();
   const userPrompt = buildClassifierUserPrompt(ctx, currentLabels);
 
   const result = await generateStructured(
     cfg.classifierSystemPrompt,
-    userPrompt,
+    toUserContent(userPrompt, images),
     ClassificationSchema,
     {
       model: cfg.classifierModel,
       maxTokens: cfg.classifierMaxTokens,
+      effort: cfg.classifierEffort,
       meta: { kind: 'classify', conversationId: ctx.conversationId },
     },
   );
@@ -109,8 +113,9 @@ export async function classifyForReplay(
   currentLabels: string[],
   cfg: Pick<
     AiConfig,
-    'classifierSystemPrompt' | 'classifierModel' | 'classifierMaxTokens'
+    'classifierSystemPrompt' | 'classifierModel' | 'classifierMaxTokens' | 'classifierEffort'
   >,
+  images: CustomerImage[] = [],
 ): Promise<{
   systemPrompt: string;
   userPrompt: string;
@@ -121,11 +126,17 @@ export async function classifyForReplay(
   const systemPrompt = cfg.classifierSystemPrompt;
   const userPrompt = buildClassifierUserPrompt(ctx, currentLabels);
 
-  const result = await generateStructured(systemPrompt, userPrompt, ClassificationSchema, {
-    model: cfg.classifierModel,
-    maxTokens: cfg.classifierMaxTokens,
-    meta: { kind: 'classify-replay', conversationId: ctx.conversationId },
-  });
+  const result = await generateStructured(
+    systemPrompt,
+    toUserContent(userPrompt, images),
+    ClassificationSchema,
+    {
+      model: cfg.classifierModel,
+      maxTokens: cfg.classifierMaxTokens,
+      effort: cfg.classifierEffort,
+      meta: { kind: 'classify-replay', conversationId: ctx.conversationId },
+    },
+  );
 
   return {
     systemPrompt,

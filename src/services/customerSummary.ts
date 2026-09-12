@@ -270,6 +270,7 @@ export async function generateAndStoreSummary(
     {
       model: cfg.summaryModel,
       maxTokens: cfg.summaryMaxTokens,
+      effort: cfg.summaryEffort,
       meta: {
         kind: 'summary',
         contactId: input.contactId,

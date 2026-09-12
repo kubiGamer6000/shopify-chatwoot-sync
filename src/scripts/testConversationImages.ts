@@ -13,7 +13,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
 import { getConversationMessages } from '../services/chatwootConversation.js';
 import { gatherCustomerImages } from '../services/attachments.js';
-import { toUserContent } from '../services/aiDraft.js';
+import { toUserContent } from '../services/attachments.js';
 
 async function main() {
   const id = process.argv[2];

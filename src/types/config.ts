@@ -1,3 +1,7 @@
+/** Claude `output_config.effort` levels (thinking depth / token spend). */
+export const AI_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type AiEffort = (typeof AI_EFFORT_LEVELS)[number];
+
 /** Full, resolved AI configuration used across the AI services. */
 export interface AiConfig {
   // Prompts
@@ -14,6 +18,13 @@ export interface AiConfig {
   summaryModel: string;
   resolverModel: string;
   holdingModel: string;
+  // Effort (adaptive thinking depth) per task
+  draftEffort: AiEffort;
+  responderEffort: AiEffort;
+  classifierEffort: AiEffort;
+  summaryEffort: AiEffort;
+  resolverEffort: AiEffort;
+  holdingEffort: AiEffort;
   // Routing / behaviour
   autoRespondLabels: string[];
   backfillAutoRespondLabels: string[];

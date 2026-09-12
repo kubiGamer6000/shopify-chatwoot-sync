@@ -21,8 +21,8 @@ Validated/typed in [`src/config/env.ts`](../src/config/env.ts).
 | `SYNC_INTERVAL_HOURS` | No | Periodic sync interval (default `0` = disabled) |
 | `PORT` | No | Server port (default `8080`) |
 | `CLAUDE_SYSTEM_PROMPT` | No | Override for the draft system prompt. Falls back to `src/config/systemPrompt.txt` |
-| `CLAUDE_MODEL` | No | Model for drafts + responder agent (default `claude-sonnet-4-20250514`) |
-| `CLAUDE_CLASSIFIER_MODEL` | No | Cheaper model for classifier + holding replies (default `claude-haiku-4-5`) |
+| `CLAUDE_MODEL` | No | Model for drafts, responder agent and Shopify matcher (default `claude-sonnet-5`) |
+| `CLAUDE_CLASSIFIER_MODEL` | No | Model for classifier + holding replies (default `claude-sonnet-5`) |
 | `CLAUDE_RESPONDER_PROMPT` | No | Override for the AgentBot responder prompt. Falls back to `src/config/responderPrompt.txt` |
 | `CHATWOOT_WEBHOOK_SECRET` | No | If set, the draft webhook URL must include `?secret=<value>` |
 | `CHATWOOT_AGENT_BOT_SECRET` | No | If set, the AgentBot webhook URL must include `?secret=<value>` |
@@ -48,11 +48,13 @@ This means you can change any system prompt, per-task model, the auto-respond/es
 
 Prompt/model surface managed this way:
 
-| Task | Default prompt | Default model |
-|------|----------------|---------------|
-| Draft generator | `systemPrompt.txt` / `CLAUDE_SYSTEM_PROMPT` | `CLAUDE_MODEL` |
-| AgentBot responder | `responderPrompt.txt` / `CLAUDE_RESPONDER_PROMPT` | `CLAUDE_MODEL` |
-| Classifier | hardcoded in `classifier.ts` | `CLAUDE_CLASSIFIER_MODEL` |
-| Customer summary | hardcoded in `customerSummary.ts` | `claude-haiku-4-5` |
-| Shopify matcher | hardcoded in `customerResolver.ts` (template) | `CLAUDE_MODEL` |
-| Holding reply | hardcoded in `aiResponder.ts` | `CLAUDE_CLASSIFIER_MODEL` |
+| Task | Default prompt | Default model | Default effort |
+|------|----------------|---------------|----------------|
+| Draft generator | `systemPrompt.txt` / `CLAUDE_SYSTEM_PROMPT` | `CLAUDE_MODEL` | `high` |
+| AgentBot responder | `responderPrompt.txt` / `CLAUDE_RESPONDER_PROMPT` | `CLAUDE_MODEL` | `high` |
+| Classifier | `aiDefaults.ts` | `CLAUDE_CLASSIFIER_MODEL` | `medium` |
+| Customer summary | `aiDefaults.ts` | `claude-sonnet-5` | `low` |
+| Shopify matcher | `aiDefaults.ts` (template) | `CLAUDE_MODEL` | `low` |
+| Holding reply | `aiDefaults.ts` | `CLAUDE_CLASSIFIER_MODEL` | `low` |
+
+Every call uses adaptive thinking; effort sets how much the model thinks (`low` → `max`). `max_tokens` limits include thinking tokens. Large system prompts are sent as cached blocks.

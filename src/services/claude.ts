@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { recordAiUsage } from './aiAudit.js';
+import type { AiEffort } from '../types/config.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
 
@@ -12,6 +13,51 @@ export interface AiCallMeta {
   kind?: string;
   conversationId?: number | null;
   contactId?: number | null;
+}
+
+export interface AiCallOptions {
+  maxTokens?: number;
+  model?: string;
+  /** Adaptive-thinking depth. Omitted = API default (`high`). */
+  effort?: AiEffort;
+  meta?: AiCallMeta;
+}
+
+/**
+ * System prompt as a cacheable block. The prompts are static per config
+ * version and render before the per-conversation user message, so repeated
+ * calls across conversations reuse the cached prefix. Prompts below the
+ * model's minimum cacheable length are simply not cached.
+ */
+export function cachedSystem(systemPrompt: string): Anthropic.TextBlockParam[] {
+  return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+}
+
+/** Adaptive thinking: the model decides per request how much to think. */
+export const ADAPTIVE_THINKING = { type: 'adaptive' } as const;
+
+/** `output_config.effort` when set (omitted = API default `high`). */
+export function effortConfig(effort?: AiEffort): { effort?: AiEffort } {
+  return effort ? { effort } : {};
+}
+
+function usageLog(usage: Anthropic.Usage) {
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+  };
+}
+
+function recordUsage(kind: string, model: string, usage: Anthropic.Usage, meta?: AiCallMeta) {
+  void recordAiUsage({
+    kind,
+    model,
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    conversationId: meta?.conversationId ?? null,
+    contactId: meta?.contactId ?? null,
+  });
 }
 
 const DraftSchema = z.object({
@@ -32,57 +78,20 @@ export interface StructuredDraft {
 /**
  * Generic single-shot structured completion: returns Claude's reply parsed and
  * validated against a Zod schema (via native JSON structured outputs), or null
- * on refusal / parse failure.
+ * on refusal / parse failure. `userContent` may include image blocks.
  */
 export async function generateStructured<T>(
   systemPrompt: string,
-  userPrompt: string,
+  userContent: string | Anthropic.ContentBlockParam[],
   schema: z.ZodType<T>,
-  opts: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
+  opts: AiCallOptions = {},
 ): Promise<T | null> {
-  const model = opts.model ?? env.claudeModel;
-  try {
-    const response = await client.messages.parse({
-      model,
-      max_tokens: opts.maxTokens ?? 1500,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-      output_config: { format: zodOutputFormat(schema) },
-    });
-
-    if (response.stop_reason === 'refusal') {
-      logger.warn('Claude refused the structured completion request');
-      return null;
-    }
-
-    const parsed = response.parsed_output;
-    if (parsed == null) {
-      logger.warn('Claude structured completion returned no parsed output', {
-        stopReason: response.stop_reason,
-      });
-      return null;
-    }
-
-    logger.info('Claude structured completion generated', {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-    });
-    void recordAiUsage({
-      kind: opts.meta?.kind ?? 'structured',
-      model,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      conversationId: opts.meta?.conversationId ?? null,
-      contactId: opts.meta?.contactId ?? null,
-    });
-
-    return parsed;
-  } catch (err) {
-    logger.error('Claude structured completion API error', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
+  return generateStructuredMessages(
+    systemPrompt,
+    [{ role: 'user', content: userContent }],
+    schema,
+    { ...opts, meta: { kind: 'structured', ...opts.meta } },
+  );
 }
 
 /**
@@ -94,88 +103,62 @@ export async function generateStructured<T>(
 export async function generateStructuredDraft(
   systemPrompt: string,
   messages: Anthropic.MessageParam[],
-  opts: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
+  opts: AiCallOptions = {},
 ): Promise<StructuredDraft | null> {
+  const parsed = await generateStructuredMessages(systemPrompt, messages, DraftSchema, {
+    ...opts,
+    meta: { kind: 'draft', ...opts.meta },
+  });
+  if (!parsed) return null;
+  return {
+    response: parsed.response,
+    noteToAgent: parsed.noteToAgent,
+    customerMessageTranslation: parsed.customerMessageTranslation,
+  };
+}
+
+/** Structured (JSON schema) completion over a full messages array. */
+async function generateStructuredMessages<T>(
+  systemPrompt: string,
+  messages: Anthropic.MessageParam[],
+  schema: z.ZodType<T>,
+  opts: AiCallOptions,
+): Promise<T | null> {
   const model = opts.model ?? env.claudeModel;
   try {
     const response = await client.messages.parse({
       model,
-      max_tokens: opts.maxTokens ?? 2048,
-      system: systemPrompt,
+      max_tokens: opts.maxTokens ?? 8000,
+      thinking: ADAPTIVE_THINKING,
+      system: cachedSystem(systemPrompt),
       messages,
-      output_config: { format: zodOutputFormat(DraftSchema) },
+      output_config: { ...effortConfig(opts.effort), format: zodOutputFormat(schema) },
     });
 
     if (response.stop_reason === 'refusal') {
-      logger.warn('Claude refused the structured draft request');
+      logger.warn('Claude refused the structured request', { kind: opts.meta?.kind });
       return null;
     }
 
     const parsed = response.parsed_output;
-    if (!parsed) {
-      logger.warn('Claude structured draft returned no parsed output', {
+    if (parsed == null) {
+      logger.warn('Claude structured output was not parsed', {
+        kind: opts.meta?.kind,
         stopReason: response.stop_reason,
       });
       return null;
     }
 
-    logger.info('Claude structured draft generated', {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      hasNote: Boolean(parsed.noteToAgent),
-      hasTranslation: Boolean(parsed.customerMessageTranslation),
+    logger.info('Claude structured output generated', {
+      kind: opts.meta?.kind,
+      ...usageLog(response.usage),
     });
-    void recordAiUsage({
-      kind: opts.meta?.kind ?? 'draft',
-      model,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      conversationId: opts.meta?.conversationId ?? null,
-      contactId: opts.meta?.contactId ?? null,
-    });
+    recordUsage(opts.meta?.kind ?? 'structured', model, response.usage, opts.meta);
 
-    return {
-      response: parsed.response,
-      noteToAgent: parsed.noteToAgent,
-      customerMessageTranslation: parsed.customerMessageTranslation,
-    };
+    return parsed;
   } catch (err) {
-    logger.error('Claude structured draft API error', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-export async function generateDraft(
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<string | null> {
-  try {
-    const response = await client.messages.create({
-      model: env.claudeModel,
-      max_tokens: 2048,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-
-    const textBlock = response.content.find((b) => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      logger.warn('Claude returned no text content', {
-        stopReason: response.stop_reason,
-      });
-      return null;
-    }
-
-    logger.info('Claude draft generated', {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      stopReason: response.stop_reason,
-    });
-
-    return textBlock.text;
-  } catch (err) {
-    logger.error('Claude API error', {
+    logger.error('Claude structured request API error', {
+      kind: opts.meta?.kind,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -183,47 +166,53 @@ export async function generateDraft(
 }
 
 /**
- * Generic single-shot completion. Used for the customer summary (and reusable
- * for other internal AI features). Returns the text content or null on failure.
+ * Generic single-shot text completion (e.g. holding replies). Returns the text
+ * content or null on failure.
  */
 export async function generateCompletion(
   systemPrompt: string,
   userPrompt: string,
-  options: { maxTokens?: number; model?: string; meta?: AiCallMeta } = {},
+  options: AiCallOptions = {},
 ): Promise<string | null> {
   const model = options.model ?? env.claudeModel;
   try {
     const response = await client.messages.create({
       model,
-      max_tokens: options.maxTokens ?? 1500,
-      system: systemPrompt,
+      max_tokens: options.maxTokens ?? 4000,
+      thinking: ADAPTIVE_THINKING,
+      output_config: effortConfig(options.effort),
+      system: cachedSystem(systemPrompt),
       messages: [{ role: 'user', content: userPrompt }],
     });
 
-    const textBlock = response.content.find((b) => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      logger.warn('Claude completion returned no text content', {
+    if (response.stop_reason === 'refusal') {
+      logger.warn('Claude refused the completion request', { kind: options.meta?.kind });
+      return null;
+    }
+
+    // With thinking on, the first block is a thinking block; join all text.
+    const text = response.content
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('')
+      .trim();
+    if (!text || response.stop_reason === 'max_tokens') {
+      logger.warn('Claude completion returned no usable text', {
+        kind: options.meta?.kind,
         stopReason: response.stop_reason,
       });
       return null;
     }
 
     logger.info('Claude completion generated', {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
+      kind: options.meta?.kind,
+      ...usageLog(response.usage),
     });
-    void recordAiUsage({
-      kind: options.meta?.kind ?? 'completion',
-      model,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      conversationId: options.meta?.conversationId ?? null,
-      contactId: options.meta?.contactId ?? null,
-    });
+    recordUsage(options.meta?.kind ?? 'completion', model, response.usage, options.meta);
 
-    return textBlock.text;
+    return text;
   } catch (err) {
     logger.error('Claude completion API error', {
+      kind: options.meta?.kind,
       error: err instanceof Error ? err.message : String(err),
     });
     return null;

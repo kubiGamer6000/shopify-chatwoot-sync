@@ -21,7 +21,7 @@ The draft webhook handles **open** (human-owned) conversations and **skips `pend
 3. **Fetch live tracking** (17track) for the last 2 fulfilled orders' tracking numbers.
 4. **Gather customer images** (see [Image understanding](#image-understanding)).
 5. **Build the user prompt** ([`src/utils/promptBuilder.ts`](../src/utils/promptBuilder.ts)) with labelled sections: customer summary, `--- ORDER HISTORY ---`, `--- TRACKING ---`, `--- CURRENT CONVERSATION ---`, `--- PREVIOUS CONVERSATIONS ---`.
-6. **Call Claude** with the draft system prompt and model (see [configuration.md](configuration.md)); `max_tokens = 2048`; native JSON structured output.
+6. **Call Claude** with the draft system prompt and model (see [configuration.md](configuration.md)); adaptive thinking at `draftEffort`; `draftMaxTokens` 8000 (includes thinking); native JSON structured output.
 7. **Post the draft** as a private note and store it in Firestore (`aiDrafts`, keyed by conversation id, with version history).
 
 ## Structured output (three fields)

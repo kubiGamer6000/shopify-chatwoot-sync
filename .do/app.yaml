@@ -67,7 +67,7 @@ services:
         type: SECRET
       - key: CLAUDE_CLASSIFIER_MODEL
         scope: RUN_AND_BUILD_TIME
-        value: "claude-haiku-4-5"
+        value: "claude-sonnet-5"
       - key: CHATWOOT_AGENT_BOT_SECRET
         scope: RUN_AND_BUILD_TIME
         type: SECRET

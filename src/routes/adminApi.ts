@@ -12,6 +12,7 @@ import {
 } from '../services/appConfig.js';
 import { listUsers, setUserRole } from '../services/users.js';
 import { runReplay, type ReplayKind } from '../services/aiReplay.js';
+import { AI_EFFORT_LEVELS } from '../types/config.js';
 
 const router = Router();
 
@@ -47,6 +48,12 @@ const AiConfigOverridesSchema = z
     summaryModel: z.string(),
     resolverModel: z.string(),
     holdingModel: z.string(),
+    draftEffort: z.enum(AI_EFFORT_LEVELS),
+    responderEffort: z.enum(AI_EFFORT_LEVELS),
+    classifierEffort: z.enum(AI_EFFORT_LEVELS),
+    summaryEffort: z.enum(AI_EFFORT_LEVELS),
+    resolverEffort: z.enum(AI_EFFORT_LEVELS),
+    holdingEffort: z.enum(AI_EFFORT_LEVELS),
     autoRespondLabels: z.array(z.string()),
     backfillAutoRespondLabels: z.array(z.string()),
     holdingReplyEnabled: z.boolean(),

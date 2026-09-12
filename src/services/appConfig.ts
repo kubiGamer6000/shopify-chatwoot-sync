@@ -10,6 +10,7 @@
 import { getDb } from './firestore.js';
 import { logger } from '../utils/logger.js';
 import { buildDefaultAiConfig } from '../config/aiDefaults.js';
+import { AI_EFFORT_LEVELS } from '../types/config.js';
 import type {
   AiConfig,
   AiConfigOverrides,
@@ -20,6 +21,16 @@ const COLLECTION = 'systemConfig';
 const DOC_ID = 'ai';
 const VERSIONS_SUBCOLLECTION = 'versions';
 const CACHE_TTL_MS = 30_000;
+
+const EFFORT_KEYS = new Set<keyof AiConfig>([
+  'draftEffort',
+  'responderEffort',
+  'classifierEffort',
+  'summaryEffort',
+  'resolverEffort',
+  'holdingEffort',
+]);
+const EFFORT_LEVELS = new Set<string>(AI_EFFORT_LEVELS);
 
 let cache: { value: AiConfig; at: number } | null = null;
 
@@ -49,7 +60,9 @@ export function mergeAiConfig(
     if (value === undefined || value === null) continue;
 
     if (typeof value === 'string') {
-      if (value.trim().length > 0) (merged[key] as string) = value;
+      // Effort must be a level the API accepts; anything else keeps the base.
+      if (EFFORT_KEYS.has(key) && !EFFORT_LEVELS.has(value.trim())) continue;
+      if (value.trim().length > 0) (merged[key] as string) = value.trim();
     } else if (typeof value === 'number') {
       if (Number.isFinite(value) && value > 0) (merged[key] as number) = value;
     } else if (typeof value === 'boolean') {

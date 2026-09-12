@@ -37,13 +37,22 @@ const PROMPT_FIELDS: FieldDef[] = [
   { key: 'holdingSystemPrompt', label: 'Holding reply', help: 'Short holding message sent on hard escalation.' },
 ];
 
+const EFFORT_HELP = 'low | medium | high | xhigh | max: thinking depth vs speed/cost.';
+
+// Laid out as model/effort pairs in the two-column grid.
 const MODEL_FIELDS: FieldDef[] = [
   { key: 'draftModel', label: 'Draft model' },
+  { key: 'draftEffort', label: 'Draft effort', help: EFFORT_HELP },
   { key: 'responderModel', label: 'Responder model' },
+  { key: 'responderEffort', label: 'Responder effort', help: EFFORT_HELP },
   { key: 'classifierModel', label: 'Classifier model' },
+  { key: 'classifierEffort', label: 'Classifier effort', help: EFFORT_HELP },
   { key: 'summaryModel', label: 'Summary model' },
+  { key: 'summaryEffort', label: 'Summary effort', help: EFFORT_HELP },
   { key: 'resolverModel', label: 'Matcher model' },
+  { key: 'resolverEffort', label: 'Matcher effort', help: EFFORT_HELP },
   { key: 'holdingModel', label: 'Holding-reply model' },
+  { key: 'holdingEffort', label: 'Holding-reply effort', help: EFFORT_HELP },
 ];
 
 const NUMERIC_FIELDS: FieldDef[] = [
@@ -365,6 +374,7 @@ function TextField(props: {
         </div>
       </div>
       <Input value={value} onChange={(e) => onChange(e.target.value)} />
+      {def.help ? <p className="text-muted-foreground text-xs">{def.help}</p> : null}
     </div>
   );
 }

@@ -1,3 +1,5 @@
+export type AiEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface AiConfig {
   draftSystemPrompt: string;
   responderSystemPrompt: string;
@@ -11,6 +13,12 @@ export interface AiConfig {
   summaryModel: string;
   resolverModel: string;
   holdingModel: string;
+  draftEffort: AiEffort;
+  responderEffort: AiEffort;
+  classifierEffort: AiEffort;
+  summaryEffort: AiEffort;
+  resolverEffort: AiEffort;
+  holdingEffort: AiEffort;
   autoRespondLabels: string[];
   backfillAutoRespondLabels: string[];
   holdingReplyEnabled: boolean;
