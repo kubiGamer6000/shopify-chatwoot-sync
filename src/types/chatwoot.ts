@@ -39,6 +39,7 @@ export interface ChatwootWebhookPayload {
   account: ChatwootWebhookAccount;
   inbox: ChatwootWebhookInbox;
   attachments: unknown[];
+  content_attributes?: Record<string, unknown>;
 }
 
 // --- Chatwoot REST API Types ---

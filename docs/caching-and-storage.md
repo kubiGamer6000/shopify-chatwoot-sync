@@ -30,6 +30,7 @@ A single `cache` collection backs all TTL and idempotency data. Doc id scheme: `
 | `wh-shopify` | Shopify webhook id | 24h | Webhook idempotency |
 | `wh-draft` | Chatwoot message id | 24h | Draft webhook idempotency |
 | `wh-agentbot` | Chatwoot message id | 24h | AgentBot webhook idempotency |
+| `sweep` | `<conversation id>:<message id>` | 60d | Pending sweeper handles each unanswered customer message once |
 
 ### Cache invalidation
 
@@ -62,7 +63,8 @@ Best-effort, fire-and-forget writes (never throw):
 | `classifications` | conversation id | Latest classifier decision `{ labels, reasoning, model }` |
 | `agentBotDecisions` | conversation id | Latest routing decision `{ classified, routingLabels, action, reason }` (dry-run `would-*` outcomes are not recorded) |
 | `sentReplies` | auto | Replies actually sent to customers `{ conversationId, message, source }`; `source` ∈ `dashboard`, `agent-bot`, `agent-bot-holding` |
-| `responderGuardEvents` | auto | Every time the AgentBot [reply safety guard](agent-bot.md#reply-safety-guard) intervened `{ conversationId, outcome, source, violations, blockedText? }`. `outcome` ∈ blocked, preamble-stripped, missing-send-reply-tool, holding-fallback |
+| `acknowledgementShadow` | auto | Acknowledgements generated in `shadow` mode, never sent `{ conversationId, intents, language, reason, wouldSend, askedFor, handoffNote, guardOk, violations, model }` |
+| `responderGuardEvents` | auto | Every time the AgentBot [reply safety guard](agent-bot.md#8-safety-nets) intervened `{ conversationId, outcome, source, violations, blockedText? }`. `outcome` ∈ blocked, preamble-stripped, missing-send-reply-tool, holding-fallback |
 
 These power future reporting (e.g. the planned AI Usage Reports in the [Admin Control Dashboard](admin-dashboard.md)).
 

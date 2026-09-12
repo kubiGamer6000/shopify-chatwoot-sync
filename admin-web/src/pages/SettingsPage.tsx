@@ -34,7 +34,8 @@ const PROMPT_FIELDS: FieldDef[] = [
   { key: 'classifierSystemPrompt', label: 'Classifier', help: 'Assigns conversation labels that drive routing.' },
   { key: 'summarySystemPrompt', label: 'Customer summary', help: 'Builds the customer 360 AI summary.' },
   { key: 'resolverSystemPromptTemplate', label: 'Shopify matcher', help: 'Uses {{email}} placeholder. Locates unmatched customers.' },
-  { key: 'holdingSystemPrompt', label: 'Holding reply', help: 'Short holding message sent on hard escalation.' },
+  { key: 'holdingSystemPrompt', label: 'Holding reply', help: 'Short holding message sent on hard escalation (when acknowledgements are not live).' },
+  { key: 'acknowledgeSystemPrompt', label: 'Acknowledgement', help: 'Intent-specific acknowledgement sent when a conversation is handed to a human.' },
 ];
 
 const EFFORT_HELP = 'low | medium | high | xhigh | max: thinking depth vs speed/cost.';
@@ -53,6 +54,8 @@ const MODEL_FIELDS: FieldDef[] = [
   { key: 'resolverEffort', label: 'Matcher effort', help: EFFORT_HELP },
   { key: 'holdingModel', label: 'Holding-reply model' },
   { key: 'holdingEffort', label: 'Holding-reply effort', help: EFFORT_HELP },
+  { key: 'acknowledgeModel', label: 'Acknowledgement model' },
+  { key: 'acknowledgeEffort', label: 'Acknowledgement effort', help: EFFORT_HELP },
 ];
 
 const NUMERIC_FIELDS: FieldDef[] = [
@@ -60,10 +63,17 @@ const NUMERIC_FIELDS: FieldDef[] = [
   { key: 'classifierMaxTokens', label: 'Classifier max tokens' },
   { key: 'summaryMaxTokens', label: 'Summary max tokens' },
   { key: 'holdingMaxTokens', label: 'Holding max tokens' },
+  { key: 'acknowledgeMaxTokens', label: 'Acknowledgement max tokens' },
   { key: 'responderMaxTokens', label: 'Responder max tokens' },
   { key: 'responderMaxIterations', label: 'Responder max iterations' },
   { key: 'resolverMaxTokens', label: 'Matcher max tokens' },
   { key: 'resolverMaxIterations', label: 'Matcher max iterations' },
+  { key: 'agentBotDebounceSeconds', label: 'AgentBot debounce (seconds)', help: 'Wait after a customer message so quick bursts are answered once.' },
+  { key: 'maxBotRepliesPer24h', label: 'Max bot messages per conversation / 24h', help: 'Beyond this, the conversation is handed to a human without replying.' },
+  { key: 'pendingSweepIntervalMinutes', label: 'Pending sweep interval (minutes)' },
+  { key: 'pendingSweepMinAgeMinutes', label: 'Sweep: unanswered for at least (minutes)' },
+  { key: 'pendingSweepReplyMaxAgeHours', label: 'Sweep: bot replies up to (hours old)', help: 'Older unanswered messages are opened for a human instead.' },
+  { key: 'pendingSweepMaxAgeDays', label: 'Sweep: ignore older than (days)' },
 ];
 
 export function SettingsPage() {
@@ -241,6 +251,27 @@ export function SettingsPage() {
                 onChange={(v) => setField('autoRespondLabels', v)}
                 onReset={() => resetField('autoRespondLabels')}
               />
+              <div className="flex flex-col gap-1.5">
+                <TextField
+                  def={{
+                    key: 'acknowledgeMode',
+                    label: 'Acknowledgement mode',
+                    help: 'off = legacy handoff; shadow = generate and record acknowledgements without sending; live = send them.',
+                  }}
+                  value={values.acknowledgeMode}
+                  overridden={overrideKeys.has('acknowledgeMode')}
+                  onChange={(v) => setField('acknowledgeMode', v as AiConfig['acknowledgeMode'])}
+                  onReset={() => resetField('acknowledgeMode')}
+                />
+              </div>
+              <ListField
+                label="Acknowledgement labels"
+                help="Intents that get an acknowledgement on handoff. Intents in neither list are handed off without a customer message."
+                value={values.acknowledgeLabels}
+                overridden={overrideKeys.has('acknowledgeLabels')}
+                onChange={(v) => setField('acknowledgeLabels', v)}
+                onReset={() => resetField('acknowledgeLabels')}
+              />
               <ListField
                 label="Backfill auto-respond labels"
                 help="Stricter set used by the one-time backfill script."
@@ -266,6 +297,25 @@ export function SettingsPage() {
                   <Switch
                     checked={values.holdingReplyEnabled}
                     onCheckedChange={(v) => setField('holdingReplyEnabled', v)}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label>Pending sweeper</Label>
+                  <p className="text-muted-foreground text-sm">
+                    Periodically finds bot-owned conversations with an unanswered customer message and handles or opens them.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {overrideKeys.has('pendingSweepEnabled') ? (
+                    <Badge variant="info">Override</Badge>
+                  ) : (
+                    <Badge variant="secondary">Default</Badge>
+                  )}
+                  <Switch
+                    checked={values.pendingSweepEnabled}
+                    onCheckedChange={(v) => setField('pendingSweepEnabled', v)}
                   />
                 </div>
               </div>
@@ -401,6 +451,7 @@ function NumberField(props: {
         value={String(value)}
         onChange={(e) => onChange(Number(e.target.value))}
       />
+      {def.help ? <p className="text-muted-foreground text-xs">{def.help}</p> : null}
     </div>
   );
 }

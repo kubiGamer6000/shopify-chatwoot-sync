@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
-import { handleAgentBotMessage } from '../services/aiResponder.js';
+import { enqueueAgentBotJob } from '../services/agentBotQueue.js';
 import { claimOnce } from '../services/cache.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
@@ -61,7 +61,11 @@ router.post('/', (req: Request, res: Response) => {
       return;
     }
 
-    await handleAgentBotMessage(payload);
+    await enqueueAgentBotJob({
+      conversationId: payload.conversation.id,
+      contactId: payload.sender.id,
+      email: payload.sender.email,
+    });
   })().catch((err) => {
     logger.error('AgentBot processing failed', {
       conversationId: payload.conversation.id,

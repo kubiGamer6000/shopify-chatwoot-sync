@@ -148,8 +148,8 @@ async function main(): Promise<void> {
         { dryRun: args.dryRun, backfill: true },
       );
       console.log(
-        `${prefix} — ${result.action.toUpperCase()} | labels: [${result.routingLabels.join(', ') || '—'}]` +
-          `${result.classified === null ? ' (classification FAILED)' : ''}`,
+        `${prefix} — ${result.action.toUpperCase()} | intents: [${result.intents.join(', ') || '—'}]` +
+          `${result.reason ? ` | ${result.reason}` : ''}`,
       );
       results.push({ conversationId, contactId, result });
     } catch (err) {

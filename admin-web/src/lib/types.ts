@@ -7,25 +7,38 @@ export interface AiConfig {
   summarySystemPrompt: string;
   resolverSystemPromptTemplate: string;
   holdingSystemPrompt: string;
+  acknowledgeSystemPrompt: string;
   draftModel: string;
   responderModel: string;
   classifierModel: string;
   summaryModel: string;
   resolverModel: string;
   holdingModel: string;
+  acknowledgeModel: string;
   draftEffort: AiEffort;
   responderEffort: AiEffort;
   classifierEffort: AiEffort;
   summaryEffort: AiEffort;
   resolverEffort: AiEffort;
   holdingEffort: AiEffort;
+  acknowledgeEffort: AiEffort;
   autoRespondLabels: string[];
   backfillAutoRespondLabels: string[];
   holdingReplyEnabled: boolean;
+  acknowledgeMode: 'off' | 'shadow' | 'live';
+  acknowledgeLabels: string[];
+  agentBotDebounceSeconds: number;
+  maxBotRepliesPer24h: number;
+  pendingSweepEnabled: boolean;
+  pendingSweepIntervalMinutes: number;
+  pendingSweepMinAgeMinutes: number;
+  pendingSweepReplyMaxAgeHours: number;
+  pendingSweepMaxAgeDays: number;
   draftMaxTokens: number;
   classifierMaxTokens: number;
   summaryMaxTokens: number;
   holdingMaxTokens: number;
+  acknowledgeMaxTokens: number;
   responderMaxTokens: number;
   responderMaxIterations: number;
   resolverMaxTokens: number;
@@ -68,7 +81,7 @@ export interface UserRecord {
   updatedAt: string;
 }
 
-export type ReplayKind = 'draft' | 'classifier' | 'responder';
+export type ReplayKind = 'draft' | 'classifier' | 'responder' | 'acknowledge';
 
 export interface ReplayImage {
   mediaType: string;

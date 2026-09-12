@@ -15,19 +15,16 @@ import {
   getConversationDetails,
   getConversationLabels,
 } from './chatwootConversation.js';
-import {
-  classifyForReplay,
-  CLASSIFICATION_LABELS,
-  type ClassificationLabel,
-} from './classifier.js';
+import { classifyForReplay } from './classifier.js';
+import { decideRoute } from './agentBotRouting.js';
+import { buildAcknowledgementPrompt, generateAcknowledgement } from './acknowledger.js';
+import { hasPublicReply, onlyAutoRepliesUnanswered, startedByUs } from './autoReply.js';
 import { runResponderReplay } from './aiResponder.js';
 import { getAiConfig, mergeAiConfig } from './appConfig.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
 import type { AiConfigOverrides } from '../types/config.js';
 
-const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
-
-export type ReplayKind = 'draft' | 'classifier' | 'responder';
+export type ReplayKind = 'draft' | 'classifier' | 'responder' | 'acknowledge';
 
 export interface ReplayRequest {
   conversationId: number;
@@ -36,6 +33,9 @@ export interface ReplayRequest {
   overrides?: AiConfigOverrides;
   // Draft path only: reproduce the "just escalated" draft variant.
   escalation?: boolean;
+  // Replay as the bot saw it: drop everything after the customer's latest
+  // message (our later replies, notes). Default true for the bot kinds.
+  asOfLastCustomerMessage?: boolean;
 }
 
 export interface ReplayImage {
@@ -103,6 +103,19 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     { dryRun: true },
   );
 
+  const asOfCustomer = req.asOfLastCustomerMessage ?? kind !== 'draft';
+  if (asOfCustomer) {
+    const lastCustomerAt = Math.max(
+      0,
+      ...ctx.currentMessages
+        .filter((m) => m.message_type === 0 && !m.private)
+        .map((m) => m.created_at),
+    );
+    if (lastCustomerAt > 0) {
+      ctx.currentMessages = ctx.currentMessages.filter((m) => m.created_at <= lastCustomerAt);
+    }
+  }
+
   // Customer images, as every live AI path now sees them.
   const rawImages = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
   const images: ReplayImage[] = rawImages.map((img) => ({
@@ -111,8 +124,10 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     dataUrl: `data:${img.mediaType};base64,${img.base64}`,
   }));
 
+  const currentLabels = await getConversationLabels(conversationId);
+  const autoReply = onlyAutoRepliesUnanswered(ctx.currentMessages);
+
   if (kind === 'classifier') {
-    const currentLabels = await getConversationLabels(conversationId);
     const preview = await classifyForReplay(ctx, currentLabels, cfg, rawImages);
     return {
       kind,
@@ -124,29 +139,72 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       userPrompt: preview.userPrompt,
       images,
       context: { ...serializeContext(ctx), currentLabels },
-      output: { labels: preview.labels, reasoning: preview.reasoning },
+      output: {
+        classification: preview.classification,
+        autoReplyDetected: autoReply.auto,
+        autoReplySignals: autoReply.signals,
+      },
+    };
+  }
+
+  // Responder and acknowledgement previews both start from the live routing.
+  const preview = await classifyForReplay(ctx, currentLabels, cfg, rawImages);
+  const decision = decideRoute({
+    classification: autoReply.auto ? null : preview.classification,
+    cfg,
+    autoReplyDetected: autoReply.auto,
+    hasPublicReply: hasPublicReply(ctx.currentMessages),
+    customerHasOrders: ctx.orders.length > 0,
+    startedByUs: startedByUs(ctx.currentMessages),
+  });
+  const routingContext = {
+    ...serializeContext(ctx),
+    currentLabels,
+    classification: preview.classification,
+    autoReplyDetected: autoReply.auto,
+    route: decision.route,
+    intents: decision.intents,
+    routeReason: decision.reason,
+  };
+
+  if (kind === 'acknowledge') {
+    const request = {
+      ctx,
+      images: rawImages,
+      intents: decision.intents,
+      reason: decision.reason ?? 'preview',
+      language: preview.classification?.language ?? null,
+    };
+    const ack = await generateAcknowledgement(request, cfg, 'acknowledge-replay');
+    return {
+      kind,
+      conversationId,
+      contactId,
+      email,
+      model: cfg.acknowledgeModel,
+      systemPrompt: cfg.acknowledgeSystemPrompt,
+      userPrompt: buildAcknowledgementPrompt(request),
+      images,
+      context: routingContext,
+      output: {
+        routingDecision: decision.route,
+        acknowledgementMode: cfg.acknowledgeMode,
+        wouldSend: ack?.message ?? '',
+        rawMessage: ack?.rawMessage ?? null,
+        askedFor: ack?.askedFor ?? [],
+        handoffNote: ack?.handoffNote ?? null,
+        guard: { ok: ack?.guardOk ?? false, violations: ack?.violations ?? [] },
+      },
     };
   }
 
   if (kind === 'responder') {
-    const currentLabels = await getConversationLabels(conversationId);
-    const preview = await classifyForReplay(ctx, currentLabels, cfg, rawImages);
-    const classified = preview.labels ?? [];
-    const routingLabels = Array.from(
-      new Set<string>([...currentLabels, ...classified]),
-    ).filter((l): l is ClassificationLabel => CLASSIFICATION_LABEL_SET.has(l));
-
-    const autoRespondSet = new Set<string>(cfg.autoRespondLabels);
-    const mustEscalate =
-      preview.labels === null ||
-      routingLabels.length === 0 ||
-      routingLabels.some((l) => !autoRespondSet.has(l));
-
     const replay = await runResponderReplay({
       ctx,
-      labels: routingLabels,
+      labels: decision.intents,
       cfg,
       images: rawImages,
+      language: preview.classification?.language ?? null,
     });
     return {
       kind,
@@ -157,15 +215,9 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       systemPrompt: replay.systemPrompt,
       userPrompt: replay.userPrompt,
       images,
-      context: {
-        ...serializeContext(ctx),
-        currentLabels,
-        classified,
-        classifierReasoning: preview.reasoning,
-        routingLabels,
-      },
+      context: routingContext,
       output: {
-        routingDecision: mustEscalate ? 'would-escalate' : 'would-respond',
+        routingDecision: decision.route,
         availableTools: replay.toolNames,
         toolInvocations: replay.toolInvocations,
         text: replay.text,

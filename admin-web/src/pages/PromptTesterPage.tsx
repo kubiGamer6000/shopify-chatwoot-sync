@@ -19,6 +19,7 @@ const KINDS: { value: ReplayKind; label: string }[] = [
   { value: 'draft', label: 'Draft' },
   { value: 'classifier', label: 'Classifier' },
   { value: 'responder', label: 'Responder' },
+  { value: 'acknowledge', label: 'Acknowledgement' },
 ];
 
 function readUnsavedOverrides(): AiConfigOverrides | undefined {
@@ -212,6 +213,23 @@ function Section({ title, body }: { title: string; body: string }) {
   );
 }
 
+function BadgeRow({ title, values }: { title: string; values: string[] }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+        {title}
+      </span>
+      <div className="flex flex-wrap gap-1">
+        {values.length > 0 ? (
+          values.map((v) => <Badge key={v}>{v}</Badge>)
+        ) : (
+          <span className="text-muted-foreground text-sm">(none)</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function OutputView({ result }: { result: ReplayResult }) {
   const out = result.output as Record<string, unknown>;
 
@@ -233,22 +251,65 @@ function OutputView({ result }: { result: ReplayResult }) {
   }
 
   if (result.kind === 'classifier') {
-    const labels = (out.labels as string[] | null) ?? [];
+    const c = (out.classification ?? null) as {
+      labels: string[];
+      currentIntents: string[];
+      needsReply: boolean;
+      isAutoReply: boolean;
+      isSpam: boolean;
+      language: string;
+      reasoning: string;
+    } | null;
+    if (!c) {
+      return (
+        <Section
+          title="Classification"
+          body={out.autoReplyDetected ? 'Skipped: automatic reply detected from email headers.' : '(classification failed)'}
+        />
+      );
+    }
     return (
       <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-            Labels
-          </span>
-          <div className="flex flex-wrap gap-1">
-            {labels.length > 0 ? (
-              labels.map((l) => <Badge key={l}>{l}</Badge>)
-            ) : (
-              <span className="text-muted-foreground text-sm">(none)</span>
-            )}
-          </div>
+        <BadgeRow title="Labels (tagging)" values={c.labels} />
+        <BadgeRow title="Current intents (routing)" values={c.currentIntents} />
+        <div className="flex flex-wrap gap-2">
+          <Badge variant={c.needsReply ? 'secondary' : 'warning'}>needs reply: {String(c.needsReply)}</Badge>
+          <Badge variant={c.isAutoReply ? 'warning' : 'secondary'}>auto-reply: {String(c.isAutoReply)}</Badge>
+          <Badge variant={c.isSpam ? 'warning' : 'secondary'}>spam: {String(c.isSpam)}</Badge>
+          <Badge variant="secondary">language: {c.language}</Badge>
+          {out.autoReplyDetected ? <Badge variant="warning">auto-reply headers detected</Badge> : null}
         </div>
-        <Section title="Reasoning" body={String(out.reasoning ?? '(none)')} />
+        <Section title="Reasoning" body={c.reasoning || '(none)'} />
+      </div>
+    );
+  }
+
+  if (result.kind === 'acknowledge') {
+    const guard = (out.guard ?? {}) as { ok?: boolean; violations?: string[] };
+    const askedFor = (out.askedFor as string[] | undefined) ?? [];
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">Routing</span>
+          <Badge variant={out.routingDecision === 'acknowledge' ? 'success' : 'warning'}>
+            {String(out.routingDecision)}
+          </Badge>
+          <Badge variant="secondary">mode: {String(out.acknowledgementMode)}</Badge>
+          {guard.ok === false ? (
+            <Badge variant="warning">blocked by safety guard: {(guard.violations ?? []).join(', ')}</Badge>
+          ) : null}
+        </div>
+        {out.routingDecision !== 'acknowledge' ? (
+          <p className="text-muted-foreground text-sm">
+            This conversation would not get an acknowledgement (route: {String(out.routingDecision)}). The preview below shows what one would look like.
+          </p>
+        ) : null}
+        <Section
+          title="Would be sent to customer"
+          body={String(out.wouldSend || out.rawMessage || '(no acknowledgement generated)')}
+        />
+        <BadgeRow title="Asked the customer for" values={askedFor} />
+        <Section title="Handoff note for the agent" body={String(out.handoffNote ?? '(none)')} />
       </div>
     );
   }
@@ -266,7 +327,7 @@ function OutputView({ result }: { result: ReplayResult }) {
         <span className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
           Routing
         </span>
-        <Badge variant={out.routingDecision === 'would-respond' ? 'success' : 'warning'}>
+        <Badge variant={out.routingDecision === 'respond' ? 'success' : 'warning'}>
           {String(out.routingDecision)}
         </Badge>
         {guard.ok === false ? (

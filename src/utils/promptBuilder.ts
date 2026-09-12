@@ -22,10 +22,12 @@ export interface PromptContext {
   // order number). Tells the AI to ask for an order number / original email if
   // the request actually needs their order data.
   lookupGuidance?: string;
-  // Set when this draft is for a conversation the AI bot just auto-escalated to
-  // a human. The customer already received a brief holding reply; the draft
-  // should be the agent's substantive next reply.
+  // Set when this draft is for a conversation the AI bot just handed to a
+  // human; the draft should be the agent's substantive next reply.
   escalationContext?: boolean;
+  // What the customer was sent at handoff (acknowledgement or holding reply),
+  // or null when nothing was sent.
+  escalationCustomerMessage?: string | null;
 }
 
 export function buildPrompt(ctx: PromptContext): string {
@@ -40,8 +42,16 @@ export function buildPrompt(ctx: PromptContext): string {
   sections.push(buildPreviousConversationsSection(ctx.previousConversations, ctx.conversationId));
 
   if (ctx.escalationContext) {
+    const sent = ctx.escalationCustomerMessage?.trim();
     sections.push(
-      '--- JUST ESCALATED ---\nThis conversation was just auto-escalated from the AI bot to a human agent. The customer has already received a brief holding reply telling them a team member will be in touch shortly. Write the draft for the human agent\'s actual substantive next reply that resolves the customer\'s request (do not repeat the holding message).',
+      [
+        '--- JUST ESCALATED ---',
+        'This conversation was just handed from the AI bot to a human agent.',
+        sent
+          ? `The customer was already sent the message below. Do not repeat it; if it asked for information, their answer may still be pending.\n>>>\n${sent}\n<<<`
+          : 'No message was sent to the customer.',
+        "Write the draft for the human agent's actual substantive next reply that resolves the customer's request.",
+      ].join('\n'),
     );
   }
 

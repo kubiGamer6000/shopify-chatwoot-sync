@@ -6,13 +6,17 @@ import { logger } from '../utils/logger.js';
 import { gatherContextWithMatching, postAiDraft } from './aiDraft.js';
 import {
   classifyConversation,
-  CLASSIFICATION_LABELS,
+  type Classification,
   type ClassificationLabel,
 } from './classifier.js';
+import { decideRoute, type RouteKind } from './agentBotRouting.js';
+import { generateAcknowledgement } from './acknowledger.js';
+import { hasPublicReply, onlyAutoRepliesUnanswered, startedByUs } from './autoReply.js';
 import {
   getConversationLabels,
   addConversationLabels,
   sendReply,
+  postPrivateNote,
   setConversationStatus,
   resolveConversation,
 } from './chatwootConversation.js';
@@ -28,6 +32,8 @@ import {
   recordAgentBotDecision,
   recordResponderGuardEvent,
   recordSentReply,
+  recordShadowAcknowledgement,
+  countRecentBotMessages,
 } from './aiAudit.js';
 import { getAiConfig } from './appConfig.js';
 import {
@@ -42,11 +48,8 @@ import {
   vetHoldingReply,
   type VettedHoldingReply,
 } from '../utils/responderFormat.js';
-import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
-
-const CLASSIFICATION_LABEL_SET = new Set<string>(CLASSIFICATION_LABELS);
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -59,6 +62,10 @@ interface ConversationTarget {
   email?: string | null;
   ctx: PromptContext;
   images: CustomerImage[];
+  /** Customer's language per the classifier, when known. */
+  language: string | null;
+  /** Intents in play, for acknowledgements and the handoff note. */
+  intents: string[];
 }
 
 /**
@@ -66,7 +73,10 @@ interface ConversationTarget {
  * (where no responder agent runs), vetted for customer safety. Falls back to a
  * fixed message when generation fails or the result is not customer-safe.
  */
-async function generateHoldingReply(ctx: PromptContext): Promise<VettedHoldingReply> {
+async function generateHoldingReply(
+  ctx: PromptContext,
+  language: string | null,
+): Promise<VettedHoldingReply> {
   const cfg = await getAiConfig();
   const reply = await generateCompletion(cfg.holdingSystemPrompt, buildPrompt(ctx), {
     model: cfg.holdingModel,
@@ -75,7 +85,7 @@ async function generateHoldingReply(ctx: PromptContext): Promise<VettedHoldingRe
     meta: { kind: 'holding', conversationId: ctx.conversationId },
   });
 
-  return vetHoldingReply(reply ?? '', ctx.customerName);
+  return vetHoldingReply(reply ?? '', ctx.customerName, language);
 }
 
 /**
@@ -98,32 +108,118 @@ async function sendHoldingReply(
       violations: holding.violations,
     });
   }
-  await sendReply(conversationId, holding.content);
-  void recordSentReply({
-    conversationId,
-    message: holding.content,
-    source: 'agent-bot-holding',
-  });
+  await sendBotMessage(conversationId, holding.content, 'agent-bot-holding');
+}
+
+/** Sends a public bot message and records it (drives the per-conversation cap). */
+async function sendBotMessage(
+  conversationId: number,
+  content: string,
+  source: 'agent-bot' | 'agent-bot-holding',
+): Promise<void> {
+  await sendReply(conversationId, content);
+  void recordSentReply({ conversationId, message: content, source });
 }
 
 /**
- * Hands a conversation to a human: moves it to `open`, sends a holding reply
- * (when enabled), and posts an escalation draft for the agent.
+ * What the customer hears when a conversation is handed to a human:
+ * - `acknowledge`: an intent-specific acknowledgement (live mode), or the
+ *   legacy holding reply (off/shadow modes, when holding replies are enabled).
+ * - `none`: nothing.
+ */
+type HandoffMessage = 'acknowledge' | 'none';
+
+/**
+ * Picks and sends the customer-facing handoff message. Returns what was sent
+ * (null when nothing was) plus acknowledgement details for the agent's note.
+ */
+async function sendHandoffMessage(
+  target: ConversationTarget,
+  reason: string,
+  agentHoldingReply: string | undefined,
+): Promise<{ sent: string | null; askedFor: string[]; note: string | null }> {
+  const { conversationId, ctx } = target;
+  const cfg = await getAiConfig();
+  const request = {
+    ctx,
+    images: target.images,
+    intents: target.intents,
+    reason,
+    language: target.language,
+  };
+
+  if (cfg.acknowledgeMode === 'live') {
+    const ack = await generateAcknowledgement(request, cfg);
+    if (ack?.guardOk) {
+      await sendBotMessage(conversationId, ack.message, 'agent-bot-holding');
+      return { sent: ack.message, askedFor: ack.askedFor, note: ack.handoffNote };
+    }
+    if (ack && !ack.guardOk) {
+      void recordResponderGuardEvent({
+        conversationId,
+        outcome: 'blocked',
+        source: 'holding_reply',
+        violations: ack.violations,
+        blockedText: ack.rawMessage,
+      });
+    }
+    // Generation failed or was unsafe: the agent's holding reply or the canned
+    // fallback still tells the customer a person is on it.
+    const holding = vetHoldingReply(agentHoldingReply ?? '', ctx.customerName, target.language);
+    await sendHoldingReply(conversationId, holding);
+    return { sent: holding.content, askedFor: [], note: null };
+  }
+
+  let sent: string | null = null;
+  if (cfg.holdingReplyEnabled) {
+    const holding =
+      agentHoldingReply !== undefined
+        ? vetHoldingReply(agentHoldingReply, ctx.customerName, target.language)
+        : await generateHoldingReply(ctx, target.language);
+    await sendHoldingReply(conversationId, holding);
+    sent = holding.content;
+  }
+
+  if (cfg.acknowledgeMode === 'shadow') {
+    // Record what the acknowledgement would have been, without sending it (in
+    // the background, so the agent's draft isn't delayed).
+    void generateAcknowledgement(request, cfg, 'acknowledge-shadow').then((ack) => {
+      if (!ack) return;
+      void recordShadowAcknowledgement({
+        conversationId,
+        intents: target.intents,
+        language: target.language,
+        reason,
+        wouldSend: ack.message,
+        askedFor: ack.askedFor,
+        handoffNote: ack.handoffNote,
+        guardOk: ack.guardOk,
+        violations: ack.violations,
+        model: cfg.acknowledgeModel,
+      });
+    });
+  }
+  return { sent, askedFor: [], note: null };
+}
+
+/**
+ * Hands a conversation to a human: moves it to `open`, sends the handoff
+ * message (see `HandoffMessage`), and posts an escalation draft headed by a
+ * handoff summary (why, intents, what the customer was told and asked for).
  *
  * The status change happens FIRST and every step is independent, so a failure
- * in the holding reply or draft (or a crash mid-way) can never leave the
+ * in the message or draft (or a crash mid-way) can never leave the
  * conversation stuck in `pending`, where agents don't see it.
  *
- * `agentHoldingReply` is the responder agent's tailored holding reply (tool
- * escalation); when omitted, one is generated.
+ * `agentHoldingReply` is the responder agent's own holding reply (tool
+ * escalation), used when no acknowledgement is sent.
  */
 async function escalateToHuman(
   target: ConversationTarget,
-  reason: string,
-  agentHoldingReply?: string,
+  opts: { reason: string; message: HandoffMessage; agentHoldingReply?: string },
 ): Promise<void> {
   const { conversationId, contactId, email, ctx, images } = target;
-  const cfg = await getAiConfig();
+  const { reason } = opts;
 
   try {
     await setConversationStatus(conversationId, 'open');
@@ -134,15 +230,16 @@ async function escalateToHuman(
     });
   }
 
-  if (cfg.holdingReplyEnabled) {
+  let handoff: { sent: string | null; askedFor: string[]; note: string | null } = {
+    sent: null,
+    askedFor: [],
+    note: null,
+  };
+  if (opts.message === 'acknowledge') {
     try {
-      const holding =
-        agentHoldingReply !== undefined
-          ? vetHoldingReply(agentHoldingReply, ctx.customerName)
-          : await generateHoldingReply(ctx);
-      await sendHoldingReply(conversationId, holding);
+      handoff = await sendHandoffMessage(target, reason, opts.agentHoldingReply);
     } catch (err) {
-      logger.error('Escalation: failed to send holding reply', {
+      logger.error('Escalation: failed to send handoff message', {
         conversationId,
         error: errMessage(err),
       });
@@ -157,6 +254,13 @@ async function escalateToHuman(
       escalation: true,
       context: ctx,
       images,
+      handoff: {
+        reason,
+        intents: target.intents,
+        customerMessage: handoff.sent,
+        askedFor: handoff.askedFor,
+        note: handoff.note,
+      },
     });
   } catch (err) {
     logger.error('Escalation: failed to post escalation draft', {
@@ -168,8 +272,31 @@ async function escalateToHuman(
   logger.info('Escalated conversation to a human', {
     conversationId,
     reason,
-    holdingReply: cfg.holdingReplyEnabled,
+    customerMessageSent: handoff.sent !== null,
   });
+}
+
+/**
+ * Resolves a conversation that needs no reply (auto-reply, spam, a closing
+ * "thanks"), leaving a private note so agents can see why.
+ */
+async function closeSilently(conversationId: number, reason: string): Promise<void> {
+  try {
+    await postPrivateNote(conversationId, `[AI] Closed without reply: ${reason}.`);
+  } catch (err) {
+    logger.warn('Failed to post close note', { conversationId, error: errMessage(err) });
+  }
+  try {
+    await resolveConversation(conversationId);
+  } catch (err) {
+    // Leave it for a human rather than stuck in pending.
+    logger.error('Failed to resolve silently closed conversation', {
+      conversationId,
+      error: errMessage(err),
+    });
+    await setConversationStatus(conversationId, 'open').catch(() => undefined);
+  }
+  logger.info('Closed conversation without reply', { conversationId, reason });
 }
 
 const ESCALATE_TOOL_DESC =
@@ -329,7 +456,7 @@ async function runResponderAgent(
       });
       return { action: 'skipped', reason };
     }
-    await escalateToHuman(target, reason, agentHoldingReply);
+    await escalateToHuman(target, { reason, message: 'acknowledge', agentHoldingReply });
     return { action: 'escalated', reason };
   };
 
@@ -410,7 +537,7 @@ async function runResponderAgent(
 
   // Last line of defence: internal reasoning, prompt scaffolding or agent
   // notes must never reach a customer. A rejected reply goes to a human.
-  const vetted = vetResponderReply(candidate);
+  const vetted = vetResponderReply(candidate, target.language);
 
   if (!vetted.ok) {
     logger.error('Responder reply blocked by the customer-safety guard', {
@@ -443,12 +570,11 @@ async function runResponderAgent(
   }
 
   try {
-    await sendReply(conversationId, vetted.content);
+    await sendBotMessage(conversationId, vetted.content, 'agent-bot');
   } catch (err) {
     logger.error('Failed to send responder reply', { conversationId, error: errMessage(err) });
     return handOff('sending the reply failed');
   }
-  void recordSentReply({ conversationId, message: vetted.content, source: 'agent-bot' });
 
   // The customer has their answer. Bookkeeping failures from here on must not
   // escalate, which would follow the answer with a contradictory holding reply.
@@ -497,8 +623,9 @@ export async function runResponderReplay(params: {
   labels: ClassificationLabel[];
   cfg: AiConfig;
   images?: CustomerImage[];
+  language?: string | null;
 }): Promise<ResponderReplayResult> {
-  const { ctx, labels, cfg, images = [] } = params;
+  const { ctx, labels, cfg, images = [], language = null } = params;
   const userPrompt = buildPrompt(ctx);
   const toolInvocations: { name: string; input: unknown }[] = [];
   const state: { reply: string | null } = { reply: null };
@@ -527,7 +654,7 @@ export async function runResponderReplay(params: {
   const text = finalText(finalMessage);
 
   // Mirror the live send path so the tester previews the real outcome.
-  const vetted = vetResponderReply(state.reply ?? text);
+  const vetted = vetResponderReply(state.reply ?? text, language);
 
   return {
     systemPrompt: cfg.responderSystemPrompt,
@@ -550,20 +677,42 @@ export async function runResponderReplay(params: {
 export type AgentBotAction =
   | 'responded'
   | 'escalated'
+  | 'handed-off'
+  | 'closed'
   | 'skipped'
   | 'failed'
   | 'would-respond'
-  | 'would-escalate'
+  | 'would-acknowledge'
+  | 'would-hand-off'
+  | 'would-close'
   | 'would-skip';
 
 export interface AgentBotRunResult {
   conversationId: number;
-  classified: ClassificationLabel[] | null;
-  routingLabels: ClassificationLabel[];
+  classification: Classification | null;
+  /** Intents the routing acted on. */
+  intents: ClassificationLabel[];
+  route: RouteKind | null;
   action: AgentBotAction;
-  /** Why it escalated / skipped / failed; null when answered. */
+  /** Why it escalated / handed off / closed / skipped / failed; null when answered. */
   reason: string | null;
 }
+
+/** A conversation for the AgentBot to process. */
+export interface AgentBotJob {
+  conversationId: number;
+  contactId: number;
+  email?: string | null;
+}
+
+const DRY_RUN_ACTION: Record<RouteKind, AgentBotAction> = {
+  respond: 'would-respond',
+  acknowledge: 'would-acknowledge',
+  handoff: 'would-hand-off',
+  close: 'would-close',
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Persists a routing decision (best-effort) and returns the result unchanged.
@@ -573,8 +722,10 @@ function finish(result: AgentBotRunResult): AgentBotRunResult {
   if (!result.action.startsWith('would-')) {
     void recordAgentBotDecision({
       conversationId: result.conversationId,
-      classified: result.classified,
-      routingLabels: result.routingLabels,
+      classified: result.classification?.labels ?? null,
+      routingLabels: result.intents,
+      intents: result.intents,
+      route: result.route,
       action: result.action,
       reason: result.reason,
     });
@@ -583,123 +734,131 @@ function finish(result: AgentBotRunResult): AgentBotRunResult {
 }
 
 /**
- * Core AgentBot flow for a single conversation: enriches customer context (with
- * Shopify matching), classifies + labels the conversation, then either
- * hard-escalates (label not auto-handleable or classification failed) or runs
- * the autonomous responder agent. Shared by the live webhook and the one-time
- * backfill script.
+ * Core AgentBot flow for a single conversation:
  *
- * When `dryRun` is true, NOTHING is mutated (no label writes, no replies, no
- * status changes, no drafts, no contact linking) — it only classifies and
- * reports the routing decision.
+ * 1. Gather context (with Shopify matching) and customer images.
+ * 2. Detect machine-generated messages from email headers; otherwise classify
+ *    and merge labels (add-only, for tagging).
+ * 3. Route on the intents that need handling now (`decideRoute`): answer via
+ *    the responder, hand off with an acknowledgement, hand off silently, or
+ *    close silently when nothing needs a reply.
+ * 4. Before sending anything, enforce the per-conversation bot message cap.
  *
- * When `backfill` is true, the flow NEVER escalates: only conversations whose
- * routing labels are a non-empty subset of `backfillAutoRespondLabels` get a
- * response; EVERYTHING else is skipped entirely (no holding reply, no draft, no
- * status change). Used by the one-time backlog script.
+ * `dryRun`: nothing is mutated (no labels, replies, status changes, drafts or
+ * contact links); only the routing decision is reported.
+ *
+ * `backfill`: never escalates. Only conversations routed to the responder whose
+ * intents are all in `backfillAutoRespondLabels` get a response; everything
+ * else is left untouched.
  */
 export async function processAgentBotConversation(
-  params: { conversationId: number; contactId: number; email?: string | null },
+  job: AgentBotJob,
   opts: { dryRun?: boolean; backfill?: boolean } = {},
 ): Promise<AgentBotRunResult> {
-  const { conversationId, contactId, email } = params;
+  const { conversationId, contactId, email } = job;
   const dryRun = opts.dryRun ?? false;
   const backfill = opts.backfill ?? false;
   const cfg = await getAiConfig();
-  const autoRespondSet = new Set<string>(cfg.autoRespondLabels);
-  const backfillSet = new Set<string>(cfg.backfillAutoRespondLabels);
 
   // 1. Context + Shopify matching, and customer images (fetched once, shared by
-  //    the classifier, the responder and any escalation draft).
+  //    the classifier, the responder, acknowledgements and any draft).
   const { context: ctx } = await gatherContextWithMatching(
     { conversationId, contactId, email },
     { dryRun },
   );
   const images = await gatherCustomerImages(ctx.currentMessages).catch(() => []);
-  const target: ConversationTarget = { conversationId, contactId, email, ctx, images };
 
-  // 2. Classify against current labels and merge (add-only). Skip writes on dry-run.
-  const currentLabels = await getConversationLabels(conversationId);
-  const classified = await classifyConversation(ctx, currentLabels, images);
-  if (!dryRun && classified && classified.length > 0) {
-    await addConversationLabels(conversationId, classified);
+  // 2. Machine-generated messages need no classification (and no reply).
+  const autoReply = onlyAutoRepliesUnanswered(ctx.currentMessages);
+  let classification: Classification | null = null;
+  if (!autoReply.auto) {
+    const currentLabels = await getConversationLabels(conversationId);
+    classification = await classifyConversation(ctx, currentLabels, images);
+    if (!dryRun && classification && classification.labels.length > 0) {
+      await addConversationLabels(conversationId, classification.labels);
+    }
   }
 
-  // 3. Routing: union of existing + new classification labels (action labels and
-  //    non-taxonomy labels are ignored for routing).
-  const routingLabels = Array.from(
-    new Set<string>([...currentLabels, ...(classified ?? [])]),
-  ).filter((l): l is ClassificationLabel => CLASSIFICATION_LABEL_SET.has(l));
-  const result = { conversationId, classified, routingLabels };
+  // 3. Routing.
+  const decision = decideRoute({
+    classification,
+    cfg,
+    autoReplyDetected: autoReply.auto,
+    hasPublicReply: hasPublicReply(ctx.currentMessages),
+    customerHasOrders: ctx.orders.length > 0,
+    startedByUs: startedByUs(ctx.currentMessages),
+  });
+  const { intents } = decision;
+  const reason =
+    autoReply.auto && decision.reason
+      ? `${decision.reason}: ${autoReply.signals.join('; ')}`
+      : decision.reason;
+  const base = { conversationId, classification, intents, route: decision.route };
+  const target: ConversationTarget = {
+    conversationId,
+    contactId,
+    email,
+    ctx,
+    images,
+    language: classification?.language ?? null,
+    intents,
+  };
 
   if (backfill) {
-    // Strict: only auto-respond to clean backfill-eligible tickets. Anything
-    // else (other, refund, mixed, classification failure) is skipped and left
-    // completely untouched.
+    const backfillSet = new Set<string>(cfg.backfillAutoRespondLabels);
     const eligible =
-      classified !== null &&
-      routingLabels.length > 0 &&
-      routingLabels.every((l) => backfillSet.has(l));
-    const reason = eligible ? null : 'not backfill-eligible';
-
+      decision.route === 'respond' && intents.every((i) => backfillSet.has(i));
+    const skipReason = eligible ? null : (reason ?? 'not backfill-eligible');
     if (dryRun) {
-      return finish({ ...result, action: eligible ? 'would-respond' : 'would-skip', reason });
+      return finish({ ...base, action: eligible ? 'would-respond' : 'would-skip', reason: skipReason });
     }
-    if (!eligible) return finish({ ...result, action: 'skipped', reason });
-
-    const outcome = await runResponderAgent({ ...target, labels: routingLabels, noEscalate: true });
-    return finish({ ...result, ...outcome });
+    if (!eligible) return finish({ ...base, action: 'skipped', reason: skipReason });
+    const outcome = await runResponderAgent({ ...target, labels: intents, noEscalate: true });
+    return finish({ ...base, ...outcome });
   }
-
-  // --- Live flow ---
-  // 4. Hard-escalate if classification failed, produced nothing usable, or any
-  //    label falls outside the auto-handleable set.
-  const blocking = routingLabels.filter((l) => !autoRespondSet.has(l));
-  const escalateReason =
-    classified === null
-      ? 'classification failed'
-      : routingLabels.length === 0
-        ? 'no routing labels'
-        : blocking.length > 0
-          ? `labels not auto-respondable: ${blocking.join(', ')}`
-          : null;
 
   if (dryRun) {
-    return finish({
-      ...result,
-      action: escalateReason ? 'would-escalate' : 'would-respond',
-      reason: escalateReason,
-    });
+    return finish({ ...base, action: DRY_RUN_ACTION[decision.route], reason });
   }
 
-  if (escalateReason) {
-    await escalateToHuman(target, escalateReason);
-    return finish({ ...result, action: 'escalated', reason: escalateReason });
+  // 4. Never let the bot message a conversation without limit (e.g. loops with
+  //    an auto-responder the detector missed).
+  if (decision.route === 'respond' || decision.route === 'acknowledge') {
+    const recent = await countRecentBotMessages(conversationId, Date.now() - DAY_MS);
+    if (recent >= cfg.maxBotRepliesPer24h) {
+      const capReason = `bot message cap reached (${recent} in 24h)`;
+      await escalateToHuman(target, { reason: capReason, message: 'none' });
+      return finish({ ...base, action: 'handed-off', reason: capReason });
+    }
   }
 
-  // 5. Eligible → responder agent.
-  const outcome = await runResponderAgent({ ...target, labels: routingLabels });
-  return finish({ ...result, ...outcome });
+  switch (decision.route) {
+    case 'close':
+      await closeSilently(conversationId, reason ?? 'no reply needed');
+      return finish({ ...base, action: 'closed', reason });
+    case 'handoff':
+      await escalateToHuman(target, { reason: reason ?? 'needs a human', message: 'none' });
+      return finish({ ...base, action: 'handed-off', reason });
+    case 'acknowledge':
+      await escalateToHuman(target, { reason: reason ?? 'needs a human', message: 'acknowledge' });
+      return finish({ ...base, action: 'escalated', reason });
+    case 'respond': {
+      const outcome = await runResponderAgent({ ...target, labels: intents });
+      return finish({ ...base, ...outcome });
+    }
+  }
 }
 
 /**
- * Entry point for the AgentBot webhook. Runs on pending conversations.
- * Must never throw (the webhook has already replied 200).
+ * Entry point for AgentBot jobs (webhook queue and pending sweeper). Must never
+ * throw.
  */
-export async function handleAgentBotMessage(
-  payload: ChatwootWebhookPayload,
-): Promise<void> {
-  const conversationId = payload.conversation.id;
-  const contactId = payload.sender.id;
-  const email = payload.sender.email;
-
-  logger.info('AgentBot processing pending conversation', {
-    conversationId,
-    contactId,
-  });
+export async function handleAgentBotJob(job: AgentBotJob): Promise<void> {
+  const { conversationId, contactId, email } = job;
+  logger.info('AgentBot processing pending conversation', { conversationId, contactId });
 
   try {
-    await processAgentBotConversation({ conversationId, contactId, email });
+    await processAgentBotConversation(job);
   } catch (err) {
     // The pipeline died before deciding (e.g. a Chatwoot/Shopify fetch failed).
     // Never leave the conversation pending and unseen: open it for a human and

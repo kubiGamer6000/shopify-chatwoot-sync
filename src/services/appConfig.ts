@@ -10,7 +10,7 @@
 import { getDb } from './firestore.js';
 import { logger } from '../utils/logger.js';
 import { buildDefaultAiConfig } from '../config/aiDefaults.js';
-import { AI_EFFORT_LEVELS } from '../types/config.js';
+import { AI_EFFORT_LEVELS, ACKNOWLEDGE_MODES } from '../types/config.js';
 import type {
   AiConfig,
   AiConfigOverrides,
@@ -29,7 +29,9 @@ const EFFORT_KEYS = new Set<keyof AiConfig>([
   'summaryEffort',
   'resolverEffort',
   'holdingEffort',
+  'acknowledgeEffort',
 ]);
+const ACKNOWLEDGE_MODE_SET = new Set<string>(ACKNOWLEDGE_MODES);
 const EFFORT_LEVELS = new Set<string>(AI_EFFORT_LEVELS);
 
 let cache: { value: AiConfig; at: number } | null = null;
@@ -62,6 +64,7 @@ export function mergeAiConfig(
     if (typeof value === 'string') {
       // Effort must be a level the API accepts; anything else keeps the base.
       if (EFFORT_KEYS.has(key) && !EFFORT_LEVELS.has(value.trim())) continue;
+      if (key === 'acknowledgeMode' && !ACKNOWLEDGE_MODE_SET.has(value.trim())) continue;
       if (value.trim().length > 0) (merged[key] as string) = value.trim();
     } else if (typeof value === 'number') {
       if (Number.isFinite(value) && value > 0) (merged[key] as number) = value;

@@ -12,7 +12,7 @@ import {
 } from '../services/appConfig.js';
 import { listUsers, setUserRole } from '../services/users.js';
 import { runReplay, type ReplayKind } from '../services/aiReplay.js';
-import { AI_EFFORT_LEVELS } from '../types/config.js';
+import { AI_EFFORT_LEVELS, ACKNOWLEDGE_MODES } from '../types/config.js';
 
 const router = Router();
 
@@ -42,25 +42,38 @@ const AiConfigOverridesSchema = z
     summarySystemPrompt: z.string(),
     resolverSystemPromptTemplate: z.string(),
     holdingSystemPrompt: z.string(),
+    acknowledgeSystemPrompt: z.string(),
     draftModel: z.string(),
     responderModel: z.string(),
     classifierModel: z.string(),
     summaryModel: z.string(),
     resolverModel: z.string(),
     holdingModel: z.string(),
+    acknowledgeModel: z.string(),
     draftEffort: z.enum(AI_EFFORT_LEVELS),
     responderEffort: z.enum(AI_EFFORT_LEVELS),
     classifierEffort: z.enum(AI_EFFORT_LEVELS),
     summaryEffort: z.enum(AI_EFFORT_LEVELS),
     resolverEffort: z.enum(AI_EFFORT_LEVELS),
     holdingEffort: z.enum(AI_EFFORT_LEVELS),
+    acknowledgeEffort: z.enum(AI_EFFORT_LEVELS),
     autoRespondLabels: z.array(z.string()),
     backfillAutoRespondLabels: z.array(z.string()),
     holdingReplyEnabled: z.boolean(),
+    acknowledgeMode: z.enum(ACKNOWLEDGE_MODES),
+    acknowledgeLabels: z.array(z.string()),
+    agentBotDebounceSeconds: z.number(),
+    maxBotRepliesPer24h: z.number(),
+    pendingSweepEnabled: z.boolean(),
+    pendingSweepIntervalMinutes: z.number(),
+    pendingSweepMinAgeMinutes: z.number(),
+    pendingSweepReplyMaxAgeHours: z.number(),
+    pendingSweepMaxAgeDays: z.number(),
     draftMaxTokens: z.number(),
     classifierMaxTokens: z.number(),
     summaryMaxTokens: z.number(),
     holdingMaxTokens: z.number(),
+    acknowledgeMaxTokens: z.number(),
     responderMaxTokens: z.number(),
     responderMaxIterations: z.number(),
     resolverMaxTokens: z.number(),
@@ -142,9 +155,10 @@ router.post('/users/:uid/role', requireAdmin, async (req: Request, res: Response
 
 const ReplaySchema = z.object({
   conversationId: z.number().int().positive(),
-  kind: z.enum(['draft', 'classifier', 'responder']),
+  kind: z.enum(['draft', 'classifier', 'responder', 'acknowledge']),
   overrides: AiConfigOverridesSchema.optional(),
   escalation: z.boolean().optional(),
+  asOfLastCustomerMessage: z.boolean().optional(),
 });
 
 router.post('/replay', requireAdmin, async (req: Request, res: Response) => {
@@ -159,6 +173,7 @@ router.post('/replay', requireAdmin, async (req: Request, res: Response) => {
       kind: parsed.data.kind as ReplayKind,
       overrides: parsed.data.overrides,
       escalation: parsed.data.escalation,
+      asOfLastCustomerMessage: parsed.data.asOfLastCustomerMessage,
     });
     res.json(result);
   } catch (err) {

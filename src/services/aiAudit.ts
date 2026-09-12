@@ -40,6 +40,11 @@ export async function recordAiUsage(entry: AiUsageEntry): Promise<void> {
 export interface ClassificationRecord {
   conversationId: number;
   labels: string[];
+  currentIntents?: string[];
+  needsReply?: boolean;
+  isAutoReply?: boolean;
+  isSpam?: boolean;
+  language?: string;
   reasoning?: string;
   model: string;
 }
@@ -67,6 +72,9 @@ export interface AgentBotDecisionRecord {
   action: string;
   /** Why the conversation was escalated/skipped/failed (null when answered). */
   reason?: string | null;
+  /** Intents the routing acted on. */
+  intents?: string[];
+  route?: string | null;
 }
 
 /** Stores the latest AgentBot routing decision for a conversation. */
@@ -145,5 +153,64 @@ export async function recordSentReply(entry: SentReplyRecord): Promise<void> {
     });
   } catch (err) {
     logger.warn('Failed to record sent reply', { error: errMessage(err) });
+  }
+}
+
+/**
+ * Counts public messages the AgentBot sent to a conversation since `sinceMs`
+ * (answers, acknowledgements and holding replies). Fails open to 0.
+ */
+export async function countRecentBotMessages(
+  conversationId: number,
+  sinceMs: number,
+): Promise<number> {
+  const db = getDb();
+  if (!db) return 0;
+  try {
+    const snap = await db
+      .collection('sentReplies')
+      .where('conversationId', '==', conversationId)
+      .get();
+    return snap.docs.filter((d) => {
+      const data = d.data() as { source?: string; ts?: number };
+      return (data.source ?? '').startsWith('agent-bot') && (data.ts ?? 0) >= sinceMs;
+    }).length;
+  } catch (err) {
+    logger.warn('Failed to count recent bot messages', { error: errMessage(err) });
+    return 0;
+  }
+}
+
+export interface ShadowAcknowledgementRecord {
+  conversationId: number;
+  intents: string[];
+  language: string | null;
+  reason: string;
+  /** Exactly what would have been sent (empty when the guard blocked it). */
+  wouldSend: string;
+  askedFor: string[];
+  handoffNote: string;
+  guardOk: boolean;
+  violations: string[];
+  model: string;
+}
+
+/**
+ * Records an acknowledgement generated in shadow mode (never sent), for review
+ * before the acknowledgement rollout goes live.
+ */
+export async function recordShadowAcknowledgement(
+  entry: ShadowAcknowledgementRecord,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.collection('acknowledgementShadow').add({
+      ...entry,
+      at: new Date().toISOString(),
+      ts: Date.now(),
+    });
+  } catch (err) {
+    logger.warn('Failed to record shadow acknowledgement', { error: errMessage(err) });
   }
 }

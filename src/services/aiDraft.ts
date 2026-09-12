@@ -265,8 +265,36 @@ async function applyResolution(
  * separated so it is never mistaken for part of the sendable message, and the
  * `[NOTE TO AGENT]` block (when present) stays below the reply as before.
  */
-export function formatDraftNote(draft: StructuredDraft): string {
+/** What the AgentBot did when handing a conversation to a human. */
+export interface HandoffSummary {
+  reason: string;
+  intents: string[];
+  /** What the customer was sent (acknowledgement or holding reply), if anything. */
+  customerMessage: string | null;
+  askedFor?: string[];
+  note?: string | null;
+}
+
+/** Formats the handoff block shown to the agent at the top of the draft note. */
+export function formatHandoffSummary(handoff: HandoffSummary): string {
+  const lines = [
+    '[AI HANDOFF]',
+    `Why: ${handoff.reason}`,
+    `Intents: ${handoff.intents.join(', ') || '(unclear)'}`,
+    handoff.customerMessage
+      ? `Customer was sent:\n${handoff.customerMessage}`
+      : 'No message was sent to the customer.',
+  ];
+  if (handoff.askedFor && handoff.askedFor.length > 0) {
+    lines.push(`Asked the customer for: ${handoff.askedFor.join('; ')}`);
+  }
+  if (handoff.note?.trim()) lines.push(`Note: ${handoff.note.trim()}`);
+  return lines.join('\n');
+}
+
+export function formatDraftNote(draft: StructuredDraft, handoff?: HandoffSummary): string {
   const sections: string[] = [];
+  if (handoff) sections.push(formatHandoffSummary(handoff));
 
   const translation = draft.customerMessageTranslation?.trim();
   if (translation) {
@@ -361,6 +389,8 @@ export async function postAiDraft(params: {
   // Shopify, tracking and matcher lookups aren't repeated.
   context?: PromptContext;
   images?: CustomerImage[];
+  // AgentBot handoff details, shown to the agent above the draft.
+  handoff?: HandoffSummary;
 }): Promise<void> {
   const { conversationId, contactId } = params;
 
@@ -383,6 +413,7 @@ export async function postAiDraft(params: {
 
   if (params.escalation) {
     ctx.escalationContext = true;
+    ctx.escalationCustomerMessage = params.handoff?.customerMessage ?? null;
   }
 
   // Include any images the customer attached to their message(s) so the model
@@ -401,8 +432,8 @@ export async function postAiDraft(params: {
     try {
       const currentLabels = await getConversationLabels(conversationId);
       const classified = await classifyConversation(ctx, currentLabels, images);
-      if (classified && classified.length > 0) {
-        await addConversationLabels(conversationId, classified);
+      if (classified && classified.labels.length > 0) {
+        await addConversationLabels(conversationId, classified.labels);
       }
     } catch (err) {
       logger.warn('Classification on open conversation failed', {
@@ -432,10 +463,14 @@ export async function postAiDraft(params: {
   );
   if (!draft) {
     logger.warn('Claude returned no draft', { conversationId });
+    // The agent still needs to know why the bot handed off.
+    if (params.handoff) {
+      await postPrivateNote(conversationId, formatHandoffSummary(params.handoff));
+    }
     return;
   }
 
-  await postPrivateNote(conversationId, formatDraftNote(draft));
+  await postPrivateNote(conversationId, formatDraftNote(draft, params.handoff));
   await storeDraft({
     conversationId,
     contactId,

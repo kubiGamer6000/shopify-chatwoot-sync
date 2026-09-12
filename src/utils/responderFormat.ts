@@ -1,6 +1,32 @@
 /** Appended to every autonomous AgentBot reply sent to the customer. */
 export const RESPONDER_SIGNATURE = 'Kind regards,\nScandi Support Team';
 
+/** Sign-off per customer language (classifier's English language name). */
+const LOCALIZED_SIGN_OFF: Record<string, string> = {
+  swedish: 'Vänliga hälsningar',
+  danish: 'Venlig hilsen',
+  norwegian: 'Vennlig hilsen',
+  finnish: 'Ystävällisin terveisin',
+  german: 'Mit freundlichen Grüßen',
+  dutch: 'Met vriendelijke groet',
+  french: 'Cordialement',
+  spanish: 'Saludos cordiales',
+  portuguese: 'Com os melhores cumprimentos',
+  italian: 'Cordiali saluti',
+  polish: 'Z poważaniem',
+  czech: 'S pozdravem',
+  hungarian: 'Üdvözlettel',
+  greek: 'Με εκτίμηση',
+  bulgarian: 'Поздрави',
+  croatian: 'Srdačan pozdrav',
+};
+
+/** The signature block for a customer language; English when unknown. */
+export function signatureFor(language?: string | null): string {
+  const signOff = LOCALIZED_SIGN_OFF[(language ?? '').trim().toLowerCase()];
+  return signOff ? `${signOff},\nScandi Support Team` : RESPONDER_SIGNATURE;
+}
+
 /**
  * Strips a trailing sign-off the model may have included despite instructions.
  */
@@ -21,9 +47,9 @@ function stripTrailingSignature(body: string): string {
  * model and is sent to a customer must go through `vetResponderReply` /
  * `vetHoldingReply` first.
  */
-export function formatResponderMessage(body: string): string {
+export function formatResponderMessage(body: string, language?: string | null): string {
   const trimmed = stripTrailingSignature(body.trim());
-  return `${trimmed}\n\n${RESPONDER_SIGNATURE}`;
+  return `${trimmed}\n\n${signatureFor(language)}`;
 }
 
 /**
@@ -106,7 +132,7 @@ export interface VettedReply {
  * scaffolding, or an agent note is rejected outright — the caller escalates to
  * a human rather than sending it.
  */
-export function vetResponderReply(raw: string): VettedReply {
+export function vetResponderReply(raw: string, language?: string | null): VettedReply {
   let body = raw.trim();
   let strippedPreamble = false;
 
@@ -130,7 +156,7 @@ export function vetResponderReply(raw: string): VettedReply {
 
   return {
     ok: true,
-    content: formatResponderMessage(body),
+    content: formatResponderMessage(body, language),
     violations: [],
     strippedPreamble,
   };
@@ -159,8 +185,12 @@ export interface VettedHoldingReply {
  * escalate on failure (the conversation is already being handed to a human), so
  * a rejected message is replaced with the fixed fallback.
  */
-export function vetHoldingReply(raw: string, name?: string): VettedHoldingReply {
-  const vetted = vetResponderReply(raw);
+export function vetHoldingReply(
+  raw: string,
+  name?: string,
+  language?: string | null,
+): VettedHoldingReply {
+  const vetted = vetResponderReply(raw, language);
   if (vetted.ok) {
     return { content: vetted.content, usedFallback: false, violations: [] };
   }

@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { postAiDraft } from '../services/aiDraft.js';
 import { claimOnce } from '../services/cache.js';
+import { autoReplySignalFromAttributes, systemPhraseSignal } from '../services/autoReply.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const router = Router();
@@ -54,6 +55,17 @@ router.post('/', (req: Request, res: Response) => {
       logger.info('Duplicate draft webhook delivery, skipping', {
         conversationId: payload.conversation.id,
         messageId: payload.id,
+      });
+      return;
+    }
+
+    // Machine-generated messages (out-of-office, bounces) need no draft.
+    if (
+      autoReplySignalFromAttributes(payload.content_attributes) ??
+      systemPhraseSignal(payload.content)
+    ) {
+      logger.info('Skipping AI draft for automatic reply', {
+        conversationId: payload.conversation.id,
       });
       return;
     }

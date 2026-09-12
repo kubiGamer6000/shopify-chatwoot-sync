@@ -50,6 +50,9 @@ export const env = {
   // System prompt for the autonomous AgentBot responder (sent directly to customers).
   responderSystemPrompt:
     process.env.CLAUDE_RESPONDER_PROMPT || loadPromptFile('responderPrompt.txt'),
+  // System prompt for intent-specific acknowledgements sent on handoff.
+  acknowledgeSystemPrompt:
+    process.env.CLAUDE_ACKNOWLEDGE_PROMPT || loadPromptFile('acknowledgePrompt.txt'),
   // Optional shared secret for the AgentBot webhook (?secret=... query param).
   agentBotWebhookSecret: process.env.CHATWOOT_AGENT_BOT_SECRET || '',
   // When false, escalations send NO holding reply to the customer — the bot just
