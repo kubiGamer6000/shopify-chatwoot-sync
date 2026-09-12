@@ -22,9 +22,9 @@ import {
 } from './chatwootConversation.js';
 import { cancelActiveSubscriptionsByEmail } from './skio.js';
 import {
-  ADAPTIVE_THINKING,
   cachedSystem,
   effortConfig,
+  thinkingFor,
   generateCompletion,
 } from './claude.js';
 import {
@@ -397,8 +397,8 @@ async function runResponderLoop(
     model: cfg.responderModel,
     max_tokens: cfg.responderMaxTokens,
     max_iterations: cfg.responderMaxIterations,
-    thinking: ADAPTIVE_THINKING,
-    output_config: effortConfig(cfg.responderEffort),
+    ...thinkingFor(cfg.responderModel),
+    output_config: effortConfig(cfg.responderModel, cfg.responderEffort),
     // One tool call per turn, as the prompt requires: the agent can't confirm a
     // cancellation in the same turn it requests one.
     tool_choice: { type: 'auto', disable_parallel_tool_use: true },

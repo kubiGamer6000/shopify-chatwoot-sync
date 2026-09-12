@@ -11,7 +11,7 @@ import {
 import { linkShopifyEmail } from './chatwoot.js';
 import { recordAiUsage } from './aiAudit.js';
 import { getAiConfig } from './appConfig.js';
-import { ADAPTIVE_THINKING, effortConfig } from './claude.js';
+import { effortConfig, thinkingFor } from './claude.js';
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 
 const client = new Anthropic({ apiKey: env.anthropicApiKey });
@@ -202,8 +202,8 @@ export async function resolveUnmatchedCustomer(params: {
       model: cfg.resolverModel,
       max_tokens: cfg.resolverMaxTokens,
       max_iterations: cfg.resolverMaxIterations,
-      thinking: ADAPTIVE_THINKING,
-      output_config: effortConfig(cfg.resolverEffort),
+      ...thinkingFor(cfg.resolverModel),
+      output_config: effortConfig(cfg.resolverModel, cfg.resolverEffort),
       system: buildResolverSystemPrompt(
         cfg.resolverSystemPromptTemplate,
         chatwootEmail,

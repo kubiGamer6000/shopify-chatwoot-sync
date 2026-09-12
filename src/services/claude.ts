@@ -36,9 +36,20 @@ export function cachedSystem(systemPrompt: string): Anthropic.TextBlockParam[] {
 /** Adaptive thinking: the model decides per request how much to think. */
 export const ADAPTIVE_THINKING = { type: 'adaptive' } as const;
 
-/** `output_config.effort` when set (omitted = API default `high`). */
-export function effortConfig(effort?: AiEffort): { effort?: AiEffort } {
-  return effort ? { effort } : {};
+/**
+ * Models from before adaptive thinking and effort, which reject both (e.g. a
+ * `claude-haiku-4-5` still set in an env var or the admin settings).
+ */
+const LEGACY_MODEL = /claude-(?:3|haiku-4-5|sonnet-4-5|opus-4-5|opus-4-1|sonnet-4-2|opus-4-2)/;
+
+/** `thinking` param for the model: adaptive, or omitted for legacy models. */
+export function thinkingFor(model: string): { thinking?: typeof ADAPTIVE_THINKING } {
+  return LEGACY_MODEL.test(model) ? {} : { thinking: ADAPTIVE_THINKING };
+}
+
+/** `output_config.effort` when set and supported (omitted = API default `high`). */
+export function effortConfig(model: string, effort?: AiEffort): { effort?: AiEffort } {
+  return effort && !LEGACY_MODEL.test(model) ? { effort } : {};
 }
 
 function usageLog(usage: Anthropic.Usage) {
@@ -129,10 +140,10 @@ async function generateStructuredMessages<T>(
     const response = await client.messages.parse({
       model,
       max_tokens: opts.maxTokens ?? 8000,
-      thinking: ADAPTIVE_THINKING,
+      ...thinkingFor(model),
       system: cachedSystem(systemPrompt),
       messages,
-      output_config: { ...effortConfig(opts.effort), format: zodOutputFormat(schema) },
+      output_config: { ...effortConfig(model, opts.effort), format: zodOutputFormat(schema) },
     });
 
     if (response.stop_reason === 'refusal') {
@@ -179,8 +190,8 @@ export async function generateCompletion(
     const response = await client.messages.create({
       model,
       max_tokens: options.maxTokens ?? 4000,
-      thinking: ADAPTIVE_THINKING,
-      output_config: effortConfig(options.effort),
+      ...thinkingFor(model),
+      output_config: effortConfig(model, options.effort),
       system: cachedSystem(systemPrompt),
       messages: [{ role: 'user', content: userPrompt }],
     });
