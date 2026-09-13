@@ -10,7 +10,8 @@
     "build:server": "tsc",
     "build": "npm run build:web && npm run build:admin && npm run build:server",
     "start": "node dist/server.js",
-    "backfill": "tsx src/scripts/backfillOpenConversations.ts"
+    "backfill": "tsx src/scripts/backfillOpenConversations.ts",
+    "review:agentbot": "tsx src/scripts/reviewAgentBot.ts"
   },
   "engines": {
     "node": "22.x"
