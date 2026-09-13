@@ -126,13 +126,13 @@ Classification labels: `business`, `change-address`, `change-contact`, `sub-canc
 | Classification failed | **acknowledge** (generic) |
 | Classifier `isAutoReply` | **close** |
 | Classifier `isSpam`, contact has no orders, intents only `business`/`other` | **close** |
-| `needsReply` false and we've replied before (closing "thanks") | **close** |
-| `needsReply` false but nothing answered yet | **handoff** (silent) |
+| `needsReply` false (closing "thanks", reactions, nothing to answer) | **close** |
 | No intents | **acknowledge** |
 | All intents in `autoRespondLabels` | **respond** |
 | Remaining intents all in `acknowledgeLabels` | **acknowledge** |
 | Otherwise | **handoff** (silent) |
-| **Override:** the conversation started with our outbound email (proactive outreach) and the route is respond/close (not an auto-reply) | **acknowledge** |
+| **Override:** route is respond but the conversation started with our outbound email (proactive outreach) | **acknowledge** |
+| **Override:** route is respond but no unanswered customer message has readable text (empty body, attachment only) | **acknowledge** |
 
 Routing uses `currentIntents`, so an old `refund` label no longer blocks a later, simple "where is my order?". Mixed intents where any one needs a human go to **acknowledge**, and one message covers all of them.
 
@@ -174,7 +174,7 @@ After the loop: escalation requested → handoff with acknowledgement; empty rep
 |---|---|---|
 | `off` | legacy holding reply if `holdingReplyEnabled` | nothing |
 | `shadow` (default) | as `off`, **plus** the acknowledgement is generated in the background and stored in `acknowledgementShadow` (never sent) | nothing |
-| `live` | the **acknowledgement** is sent; if generation fails or the guard blocks it, the agent's holding reply or the canned fallback is sent | nothing |
+| `live` | the **acknowledgement** is sent; if generation fails or the guard blocks it, the agent's holding reply or the canned fallback is sent. If the model sets `shouldSend: false` (e.g. a bulk outreach thread mixing customers), nothing is sent and the note explains why | nothing |
 
 **Acknowledgements** ([`acknowledger.ts`](../src/services/acknowledger.ts), prompt [`acknowledgePrompt.txt`](../src/config/acknowledgePrompt.txt)): structured output `{ message, askedFor[], handoffNote }`, vetted by the reply safety guard. The prompt encodes, per intent, what agents actually needed in the research (e.g. missing packs → photo of contents with pouches opened + shipping label; not-delivered → mailbox/neighbours checked, courier notice; change-address → each missing courier-ready field) and hard rules: never promise or claim an outcome, never state a cause, no policy arguments, no invented facts or links, no medical claims, customer's language.
 
@@ -253,6 +253,15 @@ All live-editable in the [Admin Dashboard](admin-dashboard.md), falling back to 
 ```bash
 npx tsx src/scripts/verifyAgentBotRouting.ts   # routing + machine-mail detection (no credentials)
 npx tsx src/scripts/verifyResponderGuard.ts    # reply safety guard (no credentials)
+```
+
+**Quality review** ([`reviewAgentBot.ts`](../src/scripts/reviewAgentBot.ts)): grades each conversation with Claude Opus 5 (route and intents correct? message good/poor/harmful? issues by severity and category, suggested fix) and writes a markdown + JSON report to `~/agentbot-reviews` (outside the repo: it contains customer data). Read-only.
+
+```bash
+npm run review:agentbot                     # every live decision in the last 24h
+npm run review:agentbot -- --hours=48 --limit=100
+npm run review:agentbot -- --replay --ids=11264,11410 \
+  --overrides='{"acknowledgeMode":"live"}'  # pre-launch: replay with unsaved config
 ```
 
 The **Prompt Tester** replays a real conversation with no side effects: `classifier`, `responder` (with routing), `acknowledge` (routing + the exact acknowledgement, asked-for list and handoff note) and `draft`. Bot kinds replay the conversation **as of the customer's latest message**, so already-answered threads show what the bot would have done at the time.

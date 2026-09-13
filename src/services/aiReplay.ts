@@ -18,7 +18,12 @@ import {
 import { classifyForReplay } from './classifier.js';
 import { decideRoute } from './agentBotRouting.js';
 import { buildAcknowledgementPrompt, generateAcknowledgement } from './acknowledger.js';
-import { hasPublicReply, onlyAutoRepliesUnanswered, startedByUs } from './autoReply.js';
+import {
+  hasPublicReply,
+  onlyAutoRepliesUnanswered,
+  startedByUs,
+  unansweredCustomerMessages,
+} from './autoReply.js';
 import { runResponderReplay } from './aiResponder.js';
 import { getAiConfig, mergeAiConfig } from './appConfig.js';
 import { buildPrompt, type PromptContext } from '../utils/promptBuilder.js';
@@ -156,6 +161,9 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     hasPublicReply: hasPublicReply(ctx.currentMessages),
     customerHasOrders: ctx.orders.length > 0,
     startedByUs: startedByUs(ctx.currentMessages),
+    latestHasText: unansweredCustomerMessages(ctx.currentMessages).some(
+      (m) => (m.content ?? '').trim().length > 0,
+    ),
   });
   const routingContext = {
     ...serializeContext(ctx),
@@ -189,7 +197,8 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
       output: {
         routingDecision: decision.route,
         acknowledgementMode: cfg.acknowledgeMode,
-        wouldSend: ack?.message ?? '',
+        shouldSend: ack?.shouldSend ?? null,
+        wouldSend: ack?.shouldSend === false ? '' : (ack?.message ?? ''),
         rawMessage: ack?.rawMessage ?? null,
         askedFor: ack?.askedFor ?? [],
         handoffNote: ack?.handoffNote ?? null,

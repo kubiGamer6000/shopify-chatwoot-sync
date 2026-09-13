@@ -11,7 +11,8 @@
  *   npm run review:agentbot -- --replay --ids=11264,11410   # pre-launch: replay
  *                                                  # conversations as of the
  *                                                  # customer's latest message
- *   Options: --out=<dir> (default ~/agentbot-reviews), --limit=N, --concurrency=N
+ *   Options: --out=<dir> (default ~/agentbot-reviews), --limit=N, --concurrency=N,
+ *            --overrides='<json>' (replay only: test unsaved config)
  *
  * Reports contain customer data: keep them out of the repository.
  */
@@ -29,6 +30,7 @@ import { getConversationDetails } from '../services/chatwootConversation.js';
 import { gatherContextWithMatching } from '../services/aiDraft.js';
 import { runReplay } from '../services/aiReplay.js';
 import { buildPrompt } from '../utils/promptBuilder.js';
+import { inlineEmailImageCount } from '../services/attachments.js';
 import type { ChatwootMessage } from '../types/chatwoot.js';
 
 const REVIEW_MODEL = 'claude-opus-5';
@@ -48,6 +50,8 @@ const IDS = (arg('ids') ?? '').split(',').map(Number).filter((n) => n > 0);
 const LIMIT = arg('limit') ? Number(arg('limit')) : null;
 const CONCURRENCY = Number(arg('concurrency') ?? 4);
 const OUT_DIR = arg('out') ?? join(homedir(), 'agentbot-reviews');
+// Replay only: unsaved config overrides as JSON, e.g. --overrides='{"acknowledgeMode":"live"}'.
+const OVERRIDES = arg('overrides') ? (JSON.parse(arg('overrides')!) as Record<string, unknown>) : undefined;
 
 // --- Case collection ---------------------------------------------------------
 
@@ -96,7 +100,9 @@ function renderTranscript(messages: ChatwootMessage[], botSent: Set<string>): st
     .map((m) => {
       const time = new Date(m.created_at * 1000).toISOString().slice(0, 16).replace('T', ' ');
       const content = (m.content ?? '').trim().slice(0, 2500) || '[no text]';
-      const atts = m.attachments?.length ? ` [${m.attachments.length} attachment(s)]` : '';
+      const inline = m.message_type === 0 ? inlineEmailImageCount(m) : 0;
+      const count = (m.attachments?.length ?? 0) + inline;
+      const atts = count ? ` [${count} attachment(s)/inline image(s)]` : '';
       if (m.message_type === 2) return `${time} · activity: ${content.slice(0, 160)}`;
       if (m.message_type === 0) return `${time} CUSTOMER${atts}: ${content}`;
       if (m.private) return `${time} [PRIVATE NOTE]: ${content.slice(0, 1500)}`;
@@ -167,7 +173,7 @@ async function collectLive(): Promise<ReviewCase[]> {
 async function collectReplay(): Promise<ReviewCase[]> {
   if (IDS.length === 0) throw new Error('--replay needs --ids=1,2,3');
   return mapPool(IDS, CONCURRENCY, async (conversationId) => {
-    const ack = await runReplay({ conversationId, kind: 'acknowledge' });
+    const ack = await runReplay({ conversationId, kind: 'acknowledge', overrides: OVERRIDES });
     const ctx = ack.context as Record<string, any>;
     const out = ack.output as Record<string, any>;
     const decision: Record<string, unknown> = {
@@ -187,16 +193,18 @@ async function collectReplay(): Promise<ReviewCase[]> {
       decision.acknowledgementGuardOk = out.guard?.ok;
       decision.askedFor = out.askedFor;
     } else if (ctx.route === 'respond') {
-      const responder = await runReplay({ conversationId, kind: 'responder' });
+      const responder = await runReplay({ conversationId, kind: 'responder', overrides: OVERRIDES });
       const r = responder.output as Record<string, any>;
       decision.responderTools = (r.toolInvocations ?? []).map((t: { name: string }) => t.name);
       const escalation = (r.toolInvocations ?? []).find(
         (t: { name: string }) => t.name === 'escalate_to_human',
       );
       if (escalation) {
-        // Live, this would hand off with an acknowledgement.
-        decision.responderOutcome = 'escalated';
+        // Live, this hands off with an acknowledgement (previewed above).
+        decision.responderOutcome = 'escalated (acknowledgement sent)';
         decision.escalationReason = escalation.input?.reason;
+        botMessages = out.wouldSend ? [out.wouldSend] : [];
+        handoffNote = out.handoffNote ?? null;
       } else {
         decision.responderOutcome = r.guard?.ok ? 'answered' : 'blocked by guard (would hand off)';
         botMessages = r.guard?.wouldSend ? [r.guard.wouldSend] : [];
@@ -268,7 +276,7 @@ How the bot works:
 - Routes: "respond" = the bot answers directly (only subscription cancellation and order status); "acknowledge" = the conversation is handed to a human agent and the customer gets an instant acknowledgement that asks for the information the agent will need; "handoff" = handed to a human with no customer message; "close" = resolved without a reply (auto-replies, bounces, spam, a closing "thanks").
 - Acknowledgements must never promise or predict outcomes (refunds, reships, cancellations, dates), never claim an action was taken, never state causes or policy, never invent facts, never claim to be human, must be in the customer's language, and should ask only for information that is genuinely missing.
 - Direct answers must be factually consistent with the order and tracking context, never say "on its way" for unfulfilled orders, and escalate stale or disputed orders.
-- The system appends the sign-off; the bot writes no signature itself.
+- The system appends a localized sign-off ("Kind regards, Scandi Support Team" or equivalent) to every message; the messages shown include it. That is expected, not an issue.
 
 Judge strictly but fairly. A missed opportunity is minor; a wrong fact, false promise, reply to a machine, or wrong language is major; anything that could cause a chargeback, legal exposure, a leaked internal note, or real customer harm is critical. Note that the order/tracking context is the CURRENT state, which may have changed since the bot acted. Cite evidence.`;
 

@@ -11,7 +11,12 @@ import {
 } from './classifier.js';
 import { decideRoute, type RouteKind } from './agentBotRouting.js';
 import { generateAcknowledgement } from './acknowledger.js';
-import { hasPublicReply, onlyAutoRepliesUnanswered, startedByUs } from './autoReply.js';
+import {
+  hasPublicReply,
+  onlyAutoRepliesUnanswered,
+  startedByUs,
+  unansweredCustomerMessages,
+} from './autoReply.js';
 import {
   getConversationLabels,
   addConversationLabels,
@@ -150,6 +155,14 @@ async function sendHandoffMessage(
 
   if (cfg.acknowledgeMode === 'live') {
     const ack = await generateAcknowledgement(request, cfg);
+    if (ack && !ack.shouldSend) {
+      // e.g. a bulk outreach thread mixing customers: the agent handles it.
+      return {
+        sent: null,
+        askedFor: [],
+        note: `No acknowledgement sent (judged unsafe to send in this thread). ${ack.handoffNote}`,
+      };
+    }
     if (ack?.guardOk) {
       await sendBotMessage(conversationId, ack.message, 'agent-bot-holding');
       return { sent: ack.message, askedFor: ack.askedFor, note: ack.handoffNote };
@@ -190,7 +203,7 @@ async function sendHandoffMessage(
         intents: target.intents,
         language: target.language,
         reason,
-        wouldSend: ack.message,
+        wouldSend: ack.shouldSend ? ack.message : '',
         askedFor: ack.askedFor,
         handoffNote: ack.handoffNote,
         guardOk: ack.guardOk,
@@ -787,6 +800,9 @@ export async function processAgentBotConversation(
     hasPublicReply: hasPublicReply(ctx.currentMessages),
     customerHasOrders: ctx.orders.length > 0,
     startedByUs: startedByUs(ctx.currentMessages),
+    latestHasText: unansweredCustomerMessages(ctx.currentMessages).some(
+      (m) => (m.content ?? '').trim().length > 0,
+    ),
   });
   const { intents } = decision;
   const reason =

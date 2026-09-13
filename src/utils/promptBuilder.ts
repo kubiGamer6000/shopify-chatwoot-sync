@@ -2,6 +2,7 @@ import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { ChatwootMessage, ChatwootConversation } from '../types/chatwoot.js';
 import type { TrackingSummary } from '../types/tracking.js';
 import { formatAddress, countSubscriptionOrders } from './formatters.js';
+import { inlineEmailImageCount } from '../services/attachments.js';
 
 export interface PromptContext {
   customerName?: string;
@@ -216,7 +217,13 @@ function buildCurrentConversationSection(messages: ChatwootMessage[], emailSubje
       const role = m.message_type === 0 ? 'CUSTOMER' : 'AGENT';
       const time = new Date(m.created_at * 1000).toISOString();
       const content = m.content || '[no text content]';
-      return `[${time}] ${role}: ${content}`;
+      // Explicit, so the model never thanks a customer for a photo that
+      // doesn't exist (or misses one that does).
+      const kinds = (m.attachments ?? []).map((a) => a.file_type || 'file');
+      const inline = m.message_type === 0 ? inlineEmailImageCount(m) : 0;
+      if (inline > 0) kinds.push(`${inline} inline image${inline > 1 ? 's' : ''}`);
+      const attachments = kinds.length > 0 ? ` [attached: ${kinds.join(', ')}]` : '';
+      return `[${time}] ${role}${attachments}: ${content}`;
     });
 
   const subjectLine = emailSubject ? `Subject: ${emailSubject}\n` : '';

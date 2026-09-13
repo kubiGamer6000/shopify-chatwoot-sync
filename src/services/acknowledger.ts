@@ -13,6 +13,11 @@ import { vetResponderReply } from '../utils/responderFormat.js';
 import type { AiConfig } from '../types/config.js';
 
 const AcknowledgementSchema = z.object({
+  shouldSend: z
+    .boolean()
+    .describe(
+      'False only when sending anything to this contact would be unsafe or pointless: the thread mixes several different customers (bulk outreach replies) so it is unclear who would receive it, or the latest message is not from a customer. The agent then handles it without a customer message.',
+    ),
   message: z
     .string()
     .describe(
@@ -29,6 +34,8 @@ const AcknowledgementSchema = z.object({
 });
 
 export interface Acknowledgement {
+  /** The model judged a customer message unsafe to send here (see schema). */
+  shouldSend: boolean;
   /** Send-ready message (vetted body + signature). Empty when blocked. */
   message: string;
   /** Raw model message, kept for debugging blocked output. */
@@ -91,6 +98,7 @@ export async function generateAcknowledgement(
 
   const vetted = vetResponderReply(result.message, req.language);
   return {
+    shouldSend: result.shouldSend,
     message: vetted.content,
     rawMessage: result.message,
     askedFor: result.askedFor,

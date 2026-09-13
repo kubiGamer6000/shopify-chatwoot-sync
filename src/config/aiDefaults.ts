@@ -41,16 +41,19 @@ LABEL RULES:
 - Base your decision on the customer's own words, not on agent replies or on text quoted from our emails (order confirmations, shipping notices, newsletters, discount codes in quoted marketing).
 - "not-delivered" requires that tracking (or the customer) says it was delivered. "Fulfilled"/"success" alone does not mean delivered; a late or in-transit parcel is "order-status". Some orders ship in more than one parcel (free extras can arrive separately), so "delivered but I only got part of it" may be missing-packs or order-status.
 - Wrong flavour or wrong item received is "product-defect".
+- "I already cancelled but I'm still being charged / still receiving orders" is a billing dispute: include "refund" (and "sub-cancel" if they want it stopped).
+- Unauthorized-charge claims, chargeback or bank threats, and "if it doesn't arrive by X I'll want a refund" keep "refund" in currentIntents.
+- A bare "cancel" with no clear target (order or subscription) keeps every plausible intent ("sub-cancel" and/or "refund"); don't pick one on a guess.
 - Requests to delete personal data or an account are "other" (with any other intents they also raise).
 - Customer photos may be attached to the conversation. Use them (e.g. a photo of damaged gum or packaging is "product-defect").
 
 OUTPUT FIELDS:
 - labels: every intent raised anywhere in the conversation (for tagging). You will be shown the labels already on the conversation; repeat those that genuinely apply.
-- currentIntents: only what still needs handling NOW. Weigh the customer's latest unanswered message(s) most heavily, and include earlier requests that are still open. Leave out intents that were already fully handled earlier in the thread (e.g. a subscription an agent already confirmed as cancelled) and threats that are not requests ("otherwise I will cancel").
+- currentIntents: only what still needs handling NOW. Weigh the customer's latest unanswered message(s) most heavily, and include earlier requests that are still open. Leave out intents that were already fully handled earlier in the thread (e.g. a subscription an agent already confirmed as cancelled) and "otherwise I will cancel my subscription" threats, but keep refund/chargeback threats (see above).
 - needsReply: false ONLY when the latest unanswered message(s) need nothing from us: a pure thank-you / ok / emoji or Gmail reaction closing the topic, an automatic reply or bounce, or spam. It is true when the customer accepts an offer or answers our question ("yes please go ahead", "I'll take the partial refund", "here is my address"), asks anything, or reports a problem, even if the message also says thanks.
 - isAutoReply: true for machine-generated mail: out-of-office, auto-acknowledgements, delivery failure notices, platform notifications (payment provider or marketplace account emails, one-time codes), and copies of our own outbound emails appearing as customer messages.
 - isSpam: true for unsolicited outreach that is not from a customer: agency, software or marketing pitches, "we can bring you X orders" commission offers, review-site or ad-platform sales, supplier offers, phishing. Genuine partnership, wholesale or creator enquiries are NOT spam (label them "business"). Anyone with an order or a customer question is never spam.
-- language: the language of the customer's latest message.
+- language: the language the customer's latest message is actually written in (not their nationality, name or country: a Bulgarian customer writing in English is "English").
 
 REPLIES TO OUR OUTREACH: if the conversation starts with an agent email we sent (asking for a delivery address, a customs or tax ID, or about a delivery problem), the customer's reply is usually providing what we asked for. An address sent in reply is "change-address"; an ID number is "other". Don't treat our own template text as the customer's request.`;
 

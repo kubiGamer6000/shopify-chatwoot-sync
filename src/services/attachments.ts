@@ -90,6 +90,11 @@ function extractInlineEmailImageUrls(message: ChatwootMessage): string[] {
   return urls;
 }
 
+/** Number of photos embedded inline in an incoming email's HTML body. */
+export function inlineEmailImageCount(message: ChatwootMessage): number {
+  return extractInlineEmailImageUrls(message).length;
+}
+
 /**
  * Collects image attachments the customer sent in the current conversation and
  * downloads them as base64 so they can be passed to Claude as image content

@@ -41,7 +41,7 @@ function cls(over: Partial<Classification>): Classification {
   };
 }
 
-const facts = { autoReplyDetected: false, hasPublicReply: false, customerHasOrders: true, startedByUs: false };
+const facts = { autoReplyDetected: false, hasPublicReply: false, customerHasOrders: true, startedByUs: false, latestHasText: true };
 
 console.log('\n=== Routing ===');
 check('order-status answered', decideRoute({ ...facts, cfg, classification: cls({ labels: ['order-status'], currentIntents: ['order-status'] }) }).route === 'respond');
@@ -55,12 +55,13 @@ check('classification failure acknowledged', decideRoute({ ...facts, cfg, classi
 check('header auto-reply closed', decideRoute({ ...facts, cfg, autoReplyDetected: true, classification: null }).route === 'close');
 check('classifier auto-reply closed', decideRoute({ ...facts, cfg, classification: cls({ isAutoReply: true, needsReply: false }) }).route === 'close');
 check('thanks after our reply closed', decideRoute({ ...facts, cfg, hasPublicReply: true, classification: cls({ needsReply: false, currentIntents: [] }) }).route === 'close');
-check('no-reply-needed first message goes to a human', decideRoute({ ...facts, cfg, classification: cls({ needsReply: false, currentIntents: [] }) }).route === 'handoff');
+check('no-reply-needed message closed even without an earlier reply', decideRoute({ ...facts, cfg, classification: cls({ needsReply: false, currentIntents: [] }) }).route === 'close');
 check('spam without orders closed', decideRoute({ ...facts, cfg, customerHasOrders: false, classification: cls({ isSpam: true, labels: ['business'], currentIntents: ['business'] }) }).route === 'close');
 check('spam flag ignored for a customer with orders', decideRoute({ ...facts, cfg, classification: cls({ isSpam: true, labels: ['business'], currentIntents: ['business'] }) }).route !== 'close');
 check('spam flag ignored when a customer intent is present', decideRoute({ ...facts, cfg, customerHasOrders: false, classification: cls({ isSpam: true, labels: ['refund'], currentIntents: ['refund'] }) }).route === 'acknowledge');
 check('reply to our outreach is never auto-answered', decideRoute({ ...facts, cfg, startedByUs: true, classification: cls({ labels: ['order-status'], currentIntents: ['order-status'] }) }).route === 'acknowledge');
-check('reply to our outreach is never silently closed', decideRoute({ ...facts, cfg, startedByUs: true, hasPublicReply: true, classification: cls({ needsReply: false }) }).route === 'acknowledge');
+check('closing thanks to our outreach is closed', decideRoute({ ...facts, cfg, startedByUs: true, hasPublicReply: true, classification: cls({ needsReply: false }) }).route === 'close');
+check('empty customer message is never auto-answered', decideRoute({ ...facts, cfg, latestHasText: false, classification: cls({ labels: ['sub-cancel'], currentIntents: ['sub-cancel'] }) }).route === 'acknowledge');
 check('auto-reply to our outreach still closed', decideRoute({ ...facts, cfg, startedByUs: true, autoReplyDetected: true, classification: null }).route === 'close');
 
 console.log('\n=== Machine-generated detection ===');

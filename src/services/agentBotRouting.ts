@@ -35,13 +35,20 @@ export function decideRoute(params: {
   customerHasOrders: boolean;
   /** The conversation began with our outbound email (proactive outreach). */
   startedByUs: boolean;
+  /** At least one unanswered customer message has readable body text. */
+  latestHasText: boolean;
 }): RouteDecision {
   const decision = baseRoute(params);
-  // Replies to our own outreach (address checks, customs IDs) only make sense
-  // with the outreach context a human has, and bulk outreach threads can mix
-  // customers: never auto-answer or silently close them.
-  if (params.startedByUs && (decision.route === 'respond' || decision.route === 'close') && !params.autoReplyDetected && !params.classification?.isAutoReply) {
+  if (decision.route !== 'respond') return decision;
+  // Replies to our own outreach (address checks, customs IDs) need the outreach
+  // context a human has, and bulk outreach threads can mix customers.
+  if (params.startedByUs) {
     return { ...decision, route: 'acknowledge', reason: 'reply to our outreach email' };
+  }
+  // Never take an action (e.g. cancel a subscription) on a message we can't
+  // read: empty bodies often hide disputes stated only in the subject.
+  if (!params.latestHasText) {
+    return { ...decision, route: 'acknowledge', reason: 'customer message has no readable text' };
   }
   return decision;
 }
@@ -65,11 +72,11 @@ function baseRoute(params: Parameters<typeof decideRoute>[0]): RouteDecision {
     return { route: 'close', intents, reason: 'unsolicited outreach' };
   }
   if (!c.needsReply) {
-    // A closing "thanks" after our reply needs nothing. A first message that
-    // needs no reply is unusual, so a human takes a look.
-    return hasPublicReply
-      ? { route: 'close', intents, reason: 'no reply needed' }
-      : { route: 'handoff', intents, reason: 'no reply needed, but nothing answered yet' };
+    return {
+      route: 'close',
+      intents,
+      reason: hasPublicReply ? 'no reply needed (closing message)' : 'no reply needed',
+    };
   }
   if (intents.length === 0) {
     return { route: 'acknowledge', intents, reason: 'no intents identified' };
