@@ -26,6 +26,8 @@ The owner requirements, as numbered in this folder:
 
 ---
 
+> **Warning: Firestore read cost.** The Firestore-based scripts (AI agent metrics, and anything reading `aiUsage`, `classifications`, `sentReplies` or `agentBotDecisions`) read whole collections. On 2026-09-14 heavy analytics runs contributed to exhausting the project's daily Firestore quota, which degraded the live AgentBot and the agent panel. A dashboard must sync these collections incrementally (by `ts`), cache results, and never re-scan them per page view; keep ad-hoc runs rare until the project is on the Blaze plan.
+
 ## 1. Conventions (these override the individual guides)
 
 ### 1.1 Time windows

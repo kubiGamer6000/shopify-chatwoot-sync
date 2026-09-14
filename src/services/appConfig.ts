@@ -34,7 +34,8 @@ const EFFORT_KEYS = new Set<keyof AiConfig>([
 const ACKNOWLEDGE_MODE_SET = new Set<string>(ACKNOWLEDGE_MODES);
 const EFFORT_LEVELS = new Set<string>(AI_EFFORT_LEVELS);
 
-let cache: { value: AiConfig; at: number } | null = null;
+// `stale`: the value is a last-known-good copy kept while Firestore reads fail.
+let cache: { value: AiConfig; at: number; stale: boolean } | null = null;
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -86,6 +87,8 @@ export function mergeAiConfig(
 export async function getStoredOverrides(): Promise<{
   config: AiConfigOverrides;
   meta: AiConfigMeta;
+  /** False when the read failed (e.g. quota exhausted), as opposed to "no overrides". */
+  ok?: boolean;
 }> {
   const empty = { config: {}, meta: { updatedBy: null, updatedAt: null } };
   const db = getDb();
@@ -105,7 +108,7 @@ export async function getStoredOverrides(): Promise<{
     };
   } catch (err) {
     logger.warn('Failed to read AI config overrides', { error: errMessage(err) });
-    return empty;
+    return { ...empty, ok: false };
   }
 }
 
@@ -117,14 +120,21 @@ export async function getAiConfig(): Promise<AiConfig> {
   const defaults = getDefaultAiConfig();
   let value = defaults;
   try {
-    const { config } = await getStoredOverrides();
+    const { config, ok } = await getStoredOverrides();
+    if (ok === false && cache) {
+      // Firestore is failing: keep serving the last config we read successfully
+      // rather than silently reverting production to the shipped defaults.
+      cache = { value: cache.value, at: now, stale: true };
+      return cache.value;
+    }
     value = mergeAiConfig(defaults, config);
   } catch (err) {
     logger.warn('Falling back to default AI config', { error: errMessage(err) });
+    if (cache) return cache.value;
     value = defaults;
   }
 
-  cache = { value, at: now };
+  cache = { value, at: now, stale: false };
   return value;
 }
 

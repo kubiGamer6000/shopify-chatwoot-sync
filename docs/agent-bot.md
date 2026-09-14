@@ -173,7 +173,7 @@ After the loop: escalation requested → handoff with acknowledgement; empty rep
 | Mode | acknowledge route / responder escalation | silent handoff |
 |---|---|---|
 | `off` | legacy holding reply if `holdingReplyEnabled` | nothing |
-| `shadow` (default) | as `off`, **plus** the acknowledgement is generated in the background and stored in `acknowledgementShadow` (never sent) | nothing |
+| `shadow` | as `off`, **plus** the acknowledgement is generated in the background and stored in `acknowledgementShadow` (never sent) | nothing |
 | `live` | the **acknowledgement** is sent; if generation fails or the guard blocks it, the agent's holding reply or the canned fallback is sent. If the model sets `shouldSend: false` (e.g. a bulk outreach thread mixing customers), nothing is sent and the note explains why | nothing |
 
 **Acknowledgements** ([`acknowledger.ts`](../src/services/acknowledger.ts), prompt [`acknowledgePrompt.txt`](../src/config/acknowledgePrompt.txt)): structured output `{ message, askedFor[], handoffNote }`, vetted by the reply safety guard. The prompt encodes, per intent, what agents actually needed in the research (e.g. missing packs → photo of contents with pouches opened + shipping label; not-delivered → mailbox/neighbours checked, courier notice; change-address → each missing courier-ready field) and hard rules: never promise or claim an outcome, never state a cause, no policy arguments, no invented facts or links, no medical claims, customer's language.
@@ -210,6 +210,8 @@ After the loop: escalation requested → handoff with acknowledgement; empty rep
 
 ## 9. Known gaps
 
+0. **Firestore is a hard dependency for storage, not for behaviour.** If Firestore reads fail (e.g. the free-tier daily quota, as on 2026-09-14 10:54 UTC), the bot keeps the last config it read (or the code defaults, which match the launch settings), drafts and summaries are served from an in-memory copy of what this process generated, and idempotency, the reply cap and audit logging fail open. Heavy analytics scripts against the production Firestore can exhaust a Spark-plan quota: run them sparingly or move the project to the Blaze plan.
+
 1. **Restart during the debounce window** loses queued jobs until the sweeper picks them up (10+ minutes later).
 2. **Duplicate conversations** from the same contact (email + contact form, repeat chasers) are handled independently; nothing links them yet.
 3. **Only one inbox appears bot-routed:** Facebook and replies into the Klaviyo sender inbox never reached the AgentBot in the research sample. Attach the bot to those inboxes in Chatwoot if they should be covered.
@@ -226,9 +228,9 @@ All live-editable in the [Admin Dashboard](admin-dashboard.md), falling back to 
 
 | Setting | Default | Effect |
 |---|---|---|
-| `autoRespondLabels` | `sub-cancel, order-status, other` | intents the responder handles |
+| `autoRespondLabels` | `sub-cancel, order-status` | intents the responder handles |
 | `acknowledgeLabels` | all classification labels | intents that get an acknowledgement on handoff |
-| `acknowledgeMode` | `shadow` | `off` / `shadow` / `live` (see §7) |
+| `acknowledgeMode` | `live` | `off` / `shadow` / `live` (see §7) |
 | `holdingReplyEnabled` | `AGENT_BOT_HOLDING_REPLY` | legacy holding reply when not `live` |
 | `acknowledgeSystemPrompt` / `acknowledgeModel` / `acknowledgeEffort` / `acknowledgeMaxTokens` | `acknowledgePrompt.txt` / Sonnet 5 / `medium` / 4000 | acknowledgements |
 | `responderSystemPrompt` / `responderModel` / `responderEffort` | `responderPrompt.txt` / Sonnet 5 / `high` | responder |

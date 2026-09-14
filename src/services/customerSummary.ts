@@ -1,4 +1,5 @@
 import * as z from 'zod/v4';
+import { MemoryFallback } from './memoryFallback.js';
 import { logger } from '../utils/logger.js';
 import { getDb } from './firestore.js';
 import { generateStructured } from './claude.js';
@@ -51,25 +52,30 @@ export interface SummaryInput {
 
 // --- Firestore read/write ---
 
+// Latest summaries produced by this process, served when Firestore is unavailable.
+const memorySummaries = new MemoryFallback<CustomerSummary>();
+
 export async function getStoredSummary(
   contactId: number,
 ): Promise<CustomerSummary | null> {
   const db = getDb();
-  if (!db) return null;
+  if (!db) return memorySummaries.get(contactId);
   try {
     const snap = await db.collection(COLLECTION).doc(String(contactId)).get();
-    if (!snap.exists) return null;
+    if (!snap.exists) return memorySummaries.get(contactId);
     return snap.data() as CustomerSummary;
   } catch (err) {
-    logger.warn('Failed to read stored summary', {
+    logger.warn('Failed to read stored summary, using in-memory copy', {
       contactId,
+      found: memorySummaries.get(contactId) !== null,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return memorySummaries.get(contactId);
   }
 }
 
 async function storeSummary(summary: CustomerSummary): Promise<void> {
+  memorySummaries.set(summary.contactId, summary);
   const db = getDb();
   if (!db) return;
   try {

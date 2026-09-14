@@ -101,11 +101,7 @@ Respond in the customer's language (the language of their latest message). Plain
 // --- Routing labels ---
 
 /** Live-flow labels eligible for the autonomous responder (else hard-escalate). */
-export const DEFAULT_AUTO_RESPOND_LABELS = [
-  'sub-cancel',
-  'order-status',
-  'other',
-];
+export const DEFAULT_AUTO_RESPOND_LABELS = ['sub-cancel', 'order-status'];
 
 /**
  * Intents that get an intent-specific acknowledgement when handed to a human
@@ -167,7 +163,9 @@ export function buildDefaultAiConfig(): AiConfig {
     autoRespondLabels: [...DEFAULT_AUTO_RESPOND_LABELS],
     backfillAutoRespondLabels: [...DEFAULT_BACKFILL_AUTO_RESPOND_LABELS],
     holdingReplyEnabled: env.agentBotHoldingReplyEnabled,
-    acknowledgeMode: 'shadow',
+    // Live since the 2026-09-14 launch. Kept in code so a Firestore outage can't
+    // silently switch production back to shadow mode.
+    acknowledgeMode: 'live',
     acknowledgeLabels: [...DEFAULT_ACKNOWLEDGE_LABELS],
     // AgentBot safety / pacing
     agentBotDebounceSeconds: 30,

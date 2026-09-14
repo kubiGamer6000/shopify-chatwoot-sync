@@ -1,6 +1,10 @@
 import { logger } from '../utils/logger.js';
 import { getDb } from './firestore.js';
 import type { AiDraft } from '../types/draft.js';
+import { MemoryFallback } from './memoryFallback.js';
+
+// Latest drafts produced by this process, served when Firestore is unavailable.
+const memory = new MemoryFallback<AiDraft>();
 
 const COLLECTION = 'aiDrafts';
 // Append-only per-conversation subcollection of every draft version generated.
@@ -13,26 +17,28 @@ export async function getLatestDraft(
   conversationId: number,
 ): Promise<AiDraft | null> {
   const db = getDb();
-  if (!db) return null;
+  if (!db) return memory.get(conversationId);
   try {
     const snap = await db
       .collection(COLLECTION)
       .doc(String(conversationId))
       .get();
-    if (!snap.exists) return null;
+    if (!snap.exists) return memory.get(conversationId);
     return snap.data() as AiDraft;
   } catch (err) {
-    logger.warn('Failed to read stored draft', {
+    logger.warn('Failed to read stored draft, using in-memory copy', {
       conversationId,
+      found: memory.get(conversationId) !== null,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return memory.get(conversationId);
   }
 }
 
 /** Stores (overwrites) the latest draft for a conversation, and appends it to
  * the version history. */
 export async function storeDraft(draft: AiDraft): Promise<void> {
+  memory.set(draft.conversationId, draft);
   const db = getDb();
   if (!db) return;
   try {
