@@ -27,7 +27,7 @@ HMAC verification uses `SHOPIFY_CLIENT_SECRET`.
 ### Chatwoot
 1. Create the contact custom attributes from [syncing.md](syncing.md) (most importantly `shopify_customer_id`).
 2. Get an API token, account ID, and inbox ID.
-3. Register the AI draft webhook (**Settings → Integrations → Webhooks**) at `https://<domain>/chatwoot` (or with `?secret=`), subscribed to **Message Created**.
+3. Register the AI draft webhook (**Settings → Integrations → Webhooks**) at `https://<domain>/chatwoot` and copy its secret into `CHATWOOT_WEBHOOK_SIGNING_SECRET` ([security.md](security.md#5-webhooks)), subscribed to **Message Created**.
 4. For the autonomous bot, follow [agent-bot.md](agent-bot.md#manual-chatwoot-setup).
 
 ### Anthropic
@@ -43,7 +43,7 @@ Generate an API key → `SKIO_API_KEY`.
 Provide a Firebase service account, base64-encode it, set `FIREBASE_BASE64_SERVICE_ACCOUNT`. Enables caching, summaries, drafts, audit logs, and the admin dashboard's config/users. See [caching-and-storage.md](caching-and-storage.md).
 
 ### Dashboard App
-Set `DASHBOARD_APP_TOKEN`, deploy, then register in Chatwoot with `https://<domain>/app?token=<DASHBOARD_APP_TOKEN>` ([dashboard-app.md](dashboard-app.md)).
+Set `APP_SESSION_SECRET` and `LINK_CONFIRMATION_SECRET` (required), deploy, then register in Chatwoot with `https://<domain>/app` (no token; agents connect with their own Chatwoot token) ([dashboard-app.md](dashboard-app.md)).
 
 ### Admin Control Dashboard
 Set `ADMIN_BOOTSTRAP_EMAILS` and the `VITE_FIREBASE_*` build vars, enable Google sign-in in the Firebase console. See [admin-dashboard.md](admin-dashboard.md).
@@ -66,5 +66,5 @@ Set all environment variables as secrets in the DO dashboard or app spec. The pr
 - [ ] A test Shopify order populates the Chatwoot contact's custom attributes.
 - [ ] `POST /sync/customers` (with `Authorization: Bearer $SYNC_API_KEY`) pages through customers.
 - [ ] A test customer message produces a private-note draft within ~5-15s.
-- [ ] `/app?token=…` loads the Customer 360 panel inside Chatwoot.
+- [ ] `/app` loads the Customer 360 panel inside Chatwoot and **Connect** works.
 - [ ] `/admin` prompts Google sign-in; a bootstrap-email account reaches the dashboard, a non-admin sees the pending screen.

@@ -4,19 +4,69 @@ import type {
   GeneratedDraft,
   DraftResponse,
 } from './types';
-import { getAppToken } from './auth';
+import { getLegacyToken, getSession, refreshSession } from './auth';
 
 // Same-origin: the SPA is served from the same Express server under /app.
 const API_BASE = '/app/api';
 
-function headers(): HeadersInit {
+/** Thrown when the agent must (re)connect. */
+export class AuthRequiredError extends Error {
+  constructor() {
+    super('Please connect Customer 360 with your Chatwoot access token.');
+  }
+}
+
+let claimedAgentId: number | null = null;
+
+/** Chatwoot's (unsigned) current agent id: sent for the legacy audit trail only. */
+export function setClaimedAgentId(id: number | null): void {
+  claimedAgentId = id;
+}
+
+function headers(conversationId: number | null | undefined): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getAppToken();
-  if (token) h['x-app-token'] = token;
+  const session = getSession();
+  if (session) {
+    h['Authorization'] = `Bearer ${session.accessToken}`;
+  } else {
+    const legacy = getLegacyToken();
+    if (legacy) h['x-app-token'] = legacy;
+    if (claimedAgentId) h['x-chatwoot-agent-id'] = String(claimedAgentId);
+  }
+  if (conversationId) h['X-Chatwoot-Conversation'] = String(conversationId);
   return h;
 }
 
-async function handle<T>(res: Response): Promise<T> {
+async function request<T>(
+  path: string,
+  opts: {
+    method?: 'GET' | 'POST';
+    conversationId?: number | null;
+    body?: unknown;
+    signal?: AbortSignal;
+  } = {},
+  retried = false,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: opts.method ?? 'GET',
+    headers: headers(opts.conversationId),
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    signal: opts.signal,
+    credentials: 'omit',
+    cache: 'no-store',
+  });
+
+  if (res.status === 401) {
+    if (!retried && getSession()) {
+      const refreshed = await refreshSession();
+      if (refreshed.session) return request<T>(path, opts, true);
+      if (refreshed.transient) {
+        throw new Error('Could not renew your session right now. Try again in a moment.');
+      }
+    }
+    throw new AuthRequiredError();
+  }
+
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {
@@ -31,62 +81,58 @@ async function handle<T>(res: Response): Promise<T> {
 }
 
 export async function fetchCustomerProfile(params: {
-  shopifyCustomerId?: string | null;
-  email?: string | null;
-  contactId?: number | null;
+  conversationId: number;
   signal?: AbortSignal;
 }): Promise<CustomerProfile> {
-  const query = new URLSearchParams();
-  if (params.shopifyCustomerId) {
-    query.set('shopifyCustomerId', params.shopifyCustomerId);
-  }
-  if (params.email) query.set('email', params.email);
-  if (params.contactId) query.set('contactId', String(params.contactId));
-
-  const res = await fetch(`${API_BASE}/customer?${query.toString()}`, {
-    headers: headers(),
+  return request<CustomerProfile>('/customer', {
+    conversationId: params.conversationId,
     signal: params.signal,
   });
-  return handle<CustomerProfile>(res);
+}
+
+export async function confirmLink(
+  conversationId: number,
+  email: string,
+): Promise<{ ok: boolean }> {
+  return request('/link/confirm', { method: 'POST', conversationId, body: { email } });
 }
 
 export async function refreshSummary(params: {
-  contactId: number;
+  contactId?: number | null;
   conversationId?: number | null;
   email?: string | null;
   shopifyCustomerId?: string | null;
   customerName?: string | null;
 }): Promise<{ summary: CustomerSummary | null }> {
-  const res = await fetch(`${API_BASE}/summary/refresh`, {
+  // The server derives the contact/customer from the conversation.
+  return request('/summary/refresh', {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify(params),
+    conversationId: params.conversationId,
+    body: {},
   });
-  return handle<{ summary: CustomerSummary | null }>(res);
 }
 
 export async function getDraft(conversationId: number): Promise<DraftResponse> {
-  const res = await fetch(
-    `${API_BASE}/draft?conversationId=${encodeURIComponent(conversationId)}`,
-    { headers: headers() },
-  );
-  return handle<DraftResponse>(res);
+  return request<DraftResponse>('/draft', { conversationId });
 }
 
 export async function generateDraft(params: {
   conversationId: number;
-  contactId: number;
+  contactId?: number | null;
   email?: string | null;
   instruction?: string | null;
   previousResponse?: string | null;
   correction?: string | null;
 }): Promise<GeneratedDraft> {
-  const res = await fetch(`${API_BASE}/draft/generate`, {
+  return request<GeneratedDraft>('/draft/generate', {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify(params),
+    conversationId: params.conversationId,
+    body: {
+      instruction: params.instruction ?? null,
+      previousResponse: params.previousResponse ?? null,
+      correction: params.correction ?? null,
+    },
   });
-  return handle<GeneratedDraft>(res);
 }
 
 export async function sendReply(
@@ -94,30 +140,22 @@ export async function sendReply(
   message: string,
   resolve = true,
 ): Promise<{ ok: boolean; resolved: boolean }> {
-  const res = await fetch(`${API_BASE}/draft/send`, {
+  return request('/draft/send', {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify({ conversationId, message, resolve }),
+    conversationId,
+    body: { message, resolve },
   });
-  return handle<{ ok: boolean; resolved: boolean }>(res);
 }
 
-export async function cancelSubscription(
-  subscriptionId: string,
-  conversationId?: number | null,
-  email?: string | null,
-): Promise<{ ok: boolean; labelled?: boolean }> {
-  const body: Record<string, unknown> = {};
-  if (conversationId) body.conversationId = conversationId;
-  if (email) body.email = email;
-
-  const res = await fetch(
-    `${API_BASE}/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
-    {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify(body),
-    },
-  );
-  return handle<{ ok: boolean; labelled?: boolean }>(res);
+export async function cancelSubscription(params: {
+  subscriptionId: string;
+  conversationId: number | null;
+  reason: string;
+  notifyCustomer: boolean;
+}): Promise<{ ok: boolean; labelled?: boolean }> {
+  return request(`/subscriptions/${encodeURIComponent(params.subscriptionId)}/cancel`, {
+    method: 'POST',
+    conversationId: params.conversationId,
+    body: { reason: params.reason, notifyCustomer: params.notifyCustomer },
+  });
 }

@@ -1,11 +1,14 @@
 import { ExternalLink, Mail, Phone, MapPin, User } from 'lucide-react';
-import type { CustomerProfile } from '@/lib/types';
+import type { CustomerProfile, LinkStatus } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 
 export function ProfileHeader({
   customer,
+  linkStatus,
 }: {
   customer: CustomerProfile['customer'];
+  linkStatus?: LinkStatus;
 }) {
   const name = customer.name || 'Unknown customer';
 
@@ -16,8 +19,13 @@ export function ProfileHeader({
           {initials(customer.name)}
         </div>
         <div className="min-w-0">
-          <h1 className="truncate text-lg font-semibold leading-tight">
-            {name}
+          <h1 className="flex items-center gap-2 truncate text-lg font-semibold leading-tight">
+            <span className="truncate">{name}</span>
+            {linkStatus === 'suggested' && (
+              <Badge variant="warning" title="Suggested link: not verified as the sender">
+                Unverified
+              </Badge>
+            )}
           </h1>
           <div className="text-muted-foreground mt-1 flex flex-col gap-0.5 text-sm">
             {customer.email && (

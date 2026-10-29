@@ -34,7 +34,7 @@ When a customer is synced (via webhook or bulk sync) the server:
 | `last_order_tracking_url` | Link | Tracking URL from the latest fulfillment |
 | `default_address` | Text | Formatted default address (full country name) |
 | `recent_orders` | Text | Summary of up to 10 recent orders |
-| `shopify_email_link` | Text | Optional override email. When set, **all** Shopify lookups use this address instead of the contact's own email. See [ai-drafts.md](ai-drafts.md#unmatched-contact-matching). |
+| `shopify_email_link` | Text | Optional override email. **Only trusted after an agent confirms it in the Customer 360 tab** (signed `shopify_email_link_sig`); otherwise shown as a suggestion ([security.md](security.md)). When confirmed, Shopify lookups use this address instead of the contact's own email. See [ai-drafts.md](ai-drafts.md#unmatched-contact-matching). |
 
 ## Contact matching logic
 

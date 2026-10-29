@@ -159,11 +159,13 @@ export async function runReplay(req: ReplayRequest): Promise<ReplayResult> {
     cfg,
     autoReplyDetected: autoReply.auto,
     hasPublicReply: hasPublicReply(ctx.currentMessages),
-    customerHasOrders: ctx.orders.length > 0,
+    customerHasOrders: ctx.orders.length > 0 || Boolean(ctx.identity?.hasCandidate),
     startedByUs: startedByUs(ctx.currentMessages),
     latestHasText: unansweredCustomerMessages(ctx.currentMessages).some(
       (m) => (m.content ?? '').trim().length > 0,
     ),
+    identityNeedsAgentCheck:
+      ctx.identity?.status !== 'verified' && Boolean(ctx.identity?.hasCandidate),
   });
   const routingContext = {
     ...serializeContext(ctx),

@@ -26,6 +26,7 @@ import {
   resolveConversation,
 } from './chatwootConversation.js';
 import { cancelActiveSubscriptionsByEmail } from './skio.js';
+import { audit } from './audit.js';
 import {
   cachedSystem,
   effortConfig,
@@ -355,7 +356,21 @@ interface ResponderToolHandlers {
  * two can never drift; only the handlers differ. `cancel_subscription` is only
  * exposed when the conversation is a sub-cancel.
  */
-function buildResponderTools(labels: ClassificationLabel[], handlers: ResponderToolHandlers) {
+/**
+ * The bot may cancel only for a verified account holder, and never in an
+ * email conversation: the From address can be forged, so there it sends the
+ * self-service cancellation link instead (the reply goes to the address on
+ * file, i.e. the real owner).
+ */
+export function botMayCancel(ctx: Pick<PromptContext, 'identity' | 'channel'>): boolean {
+  return ctx.identity?.status === 'verified' && ctx.channel !== 'Channel::Email';
+}
+
+export function buildResponderTools(
+  labels: ClassificationLabel[],
+  handlers: ResponderToolHandlers,
+  opts: { canCancel: boolean },
+) {
   const sendReplyTool = betaZodTool({
     name: 'send_reply',
     description: SEND_REPLY_TOOL_DESC,
@@ -392,7 +407,10 @@ function buildResponderTools(labels: ClassificationLabel[], handlers: ResponderT
     run: () => handlers.cancelSubscription(),
   });
 
-  return labels.includes('sub-cancel')
+  // Account actions are only possible when the contact's link to the Shopify
+  // customer is verified (own email match, or agent-confirmed), and never on
+  // email inboxes (see botMayCancel).
+  return labels.includes('sub-cancel') && opts.canCancel
     ? [sendReplyTool, escalateTool, cancelTool]
     : [sendReplyTool, escalateTool];
 }
@@ -493,14 +511,50 @@ async function runResponderAgent(
         : 'The conversation will be handed to a human. You are done; do not write any further message.';
     },
     cancelSubscription: async () => {
-      const lookupEmail = ctx.customerEmail;
-      if (!lookupEmail) {
-        return 'No email on file to look up the subscription. Use send_reply to ask the customer for the email used at checkout, or escalate.';
+      // Defence in depth: the tool is only offered for verified links, but
+      // re-check here so no code path can cancel for an unverified sender.
+      if (!botMayCancel(ctx) || !ctx.customerEmail) {
+        void audit({
+          action: 'subscription.cancel',
+          actor: 'agent-bot',
+          via: 'system',
+          conversationId,
+          contactId,
+          linkStatus: ctx.identity?.status ?? null,
+          outcome: 'denied',
+          reason: ctx.channel === 'Channel::Email' ? 'email channel' : 'identity not verified',
+        });
+        return ctx.channel === 'Channel::Email'
+          ? 'You cannot cancel in an email conversation. Use send_reply to send the self-service cancellation link instead.'
+          : 'You cannot cancel: the sender is not verified as the account holder. Escalate to a human.';
       }
+      const lookupEmail = ctx.customerEmail;
+      const reason = `Customer asked to cancel in Chatwoot conversation #${conversationId} (handled by the AgentBot)`;
       try {
-        const result = await cancelActiveSubscriptionsByEmail(lookupEmail);
+        const result = await cancelActiveSubscriptionsByEmail(lookupEmail, { notifyCustomer: true });
+        void audit({
+          action: 'subscription.cancel',
+          actor: 'agent-bot',
+          via: 'system',
+          conversationId,
+          contactId,
+          shopifyCustomerId: ctx.shopifyCustomer?.id ?? null,
+          linkStatus: 'verified',
+          outcome: result.cancelled > 0 ? 'ok' : result.activeFound === 0 ? 'noop' : 'error',
+          reason,
+          detail: {
+            activeFound: result.activeFound,
+            cancelled: result.cancelled,
+            subscriptionIds: result.cancelledIds,
+            notifyCustomer: true,
+          },
+        });
         if (result.cancelled > 0) {
           await addConversationLabels(conversationId, ['sub-cancelled-ai']);
+          await postPrivateNote(
+            conversationId,
+            `[AI] Cancelled ${result.cancelled} Skio subscription(s) for the verified account holder. Reason: ${reason}. Skio cancellation notice sent to the customer.`,
+          ).catch(() => undefined);
           return `Successfully cancelled ${result.cancelled} active subscription(s). Confirm the cancellation to the customer with send_reply.`;
         }
         if (result.activeFound === 0) {
@@ -512,11 +566,11 @@ async function runResponderAgent(
         return 'The cancellation could not be completed due to an internal error. Do not claim success — escalate to a human.';
       }
     },
-  });
+  }, { canCancel: botMayCancel(ctx) });
 
   let freeText: string;
   try {
-    const run = await runResponderLoop(cfg, tools, toUserContent(buildPrompt(ctx), images));
+    const run = await runResponderLoop(cfg, tools, toUserContent(buildPrompt({ ...ctx, forAgentBot: true }), images));
     freeText = finalText(run.finalMessage);
     void recordAiUsage({
       kind: 'responder',
@@ -639,7 +693,7 @@ export async function runResponderReplay(params: {
   language?: string | null;
 }): Promise<ResponderReplayResult> {
   const { ctx, labels, cfg, images = [], language = null } = params;
-  const userPrompt = buildPrompt(ctx);
+  const userPrompt = buildPrompt({ ...ctx, forAgentBot: true });
   const toolInvocations: { name: string; input: unknown }[] = [];
   const state: { reply: string | null } = { reply: null };
 
@@ -657,7 +711,7 @@ export async function runResponderReplay(params: {
       toolInvocations.push({ name: 'cancel_subscription', input: {} });
       return 'Subscription cancelled (REPLAY: no actions performed). Confirm the cancellation to the customer.';
     },
-  });
+  }, { canCancel: botMayCancel(ctx) });
 
   const { finalMessage, inputTokens, outputTokens } = await runResponderLoop(
     cfg,
@@ -798,11 +852,13 @@ export async function processAgentBotConversation(
     cfg,
     autoReplyDetected: autoReply.auto,
     hasPublicReply: hasPublicReply(ctx.currentMessages),
-    customerHasOrders: ctx.orders.length > 0,
+    customerHasOrders: ctx.orders.length > 0 || Boolean(ctx.identity?.hasCandidate),
     startedByUs: startedByUs(ctx.currentMessages),
     latestHasText: unansweredCustomerMessages(ctx.currentMessages).some(
       (m) => (m.content ?? '').trim().length > 0,
     ),
+    identityNeedsAgentCheck:
+      ctx.identity?.status !== 'verified' && Boolean(ctx.identity?.hasCandidate),
   });
   const { intents } = decision;
   const reason =
@@ -841,8 +897,13 @@ export async function processAgentBotConversation(
   //    an auto-responder the detector missed).
   if (decision.route === 'respond' || decision.route === 'acknowledge') {
     const recent = await countRecentBotMessages(conversationId, Date.now() - DAY_MS);
-    if (recent >= cfg.maxBotRepliesPer24h) {
-      const capReason = `bot message cap reached (${recent} in 24h)`;
+    // Fail safe: if the reply log can't be read we can't enforce the cap, so
+    // the bot does not message the customer; a human takes over.
+    if (recent === null || recent >= cfg.maxBotRepliesPer24h) {
+      const capReason =
+        recent === null
+          ? 'bot reply log unavailable (cannot enforce the reply cap)'
+          : `bot message cap reached (${recent} in 24h)`;
       await escalateToHuman(target, { reason: capReason, message: 'none' });
       return finish({ ...base, action: 'handed-off', reason: capReason });
     }

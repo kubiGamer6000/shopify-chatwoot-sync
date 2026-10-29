@@ -17,7 +17,8 @@
  */
 import { logger } from '../utils/logger.js';
 import { getAiConfig } from './appConfig.js';
-import { claimOnce } from './cache.js';
+import { claim } from './cache.js';
+import { handOffWithoutBot } from './botSafety.js';
 import { listConversations, setConversationStatus } from './chatwootConversation.js';
 import { enqueueAgentBotJob, isConversationBusy } from './agentBotQueue.js';
 import { postAiDraft } from './aiDraft.js';
@@ -91,8 +92,14 @@ export async function sweepPendingConversations(): Promise<SweepStats | null> {
         const email = (conversation.meta?.sender?.email as string | undefined) ?? null;
 
         // Once per customer message, even across restarts.
-        const fresh = await claimOnce('sweep', `${conversationId}:${last.id}`, SWEEP_CLAIM_TTL_MS);
-        if (!fresh) continue;
+        const claimed = await claim('sweep', `${conversationId}:${last.id}`, SWEEP_CLAIM_TTL_MS);
+        if (claimed === 'duplicate') continue;
+        if (claimed === 'unavailable') {
+          // Fail safe: without durable dedupe the bot must not reply; hand off.
+          await handOffWithoutBot(conversationId, 'duplicate-protection store unavailable');
+          stats.opened++;
+          continue;
+        }
 
         if (ageMs <= replyMaxAgeMs) {
           logger.warn('Sweeper: unanswered pending conversation, processing', {

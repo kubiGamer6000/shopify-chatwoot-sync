@@ -1,7 +1,7 @@
 import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { ChatwootMessage, ChatwootConversation } from '../types/chatwoot.js';
 import type { TrackingSummary } from '../types/tracking.js';
-import { formatAddress, countSubscriptionOrders } from './formatters.js';
+import { formatAddress, countSubscriptionOrders, formatLifetimeValue } from './formatters.js';
 import { inlineEmailImageCount } from '../services/attachments.js';
 
 export interface PromptContext {
@@ -23,6 +23,18 @@ export interface PromptContext {
   // order number). Tells the AI to ask for an order number / original email if
   // the request actually needs their order data.
   lookupGuidance?: string;
+  // How sure we are that this contact IS the Shopify customer. Unless
+  // `verified`, the orders/customer above are empty and the AI must not reveal
+  // or act on any account details (security fix P1).
+  // Chatwoot channel type of the conversation (e.g. 'Channel::Email').
+  channel?: string | null;
+  // Set when the prompt is for the autonomous AgentBot (not an agent draft).
+  forAgentBot?: boolean;
+  identity?: {
+    status: 'verified' | 'suggested' | 'none';
+    /** A possible account match is waiting for an agent to confirm it. */
+    hasCandidate: boolean;
+  };
   // Set when this draft is for a conversation the AI bot just handed to a
   // human; the draft should be the agent's substantive next reply.
   escalationContext?: boolean;
@@ -56,6 +68,30 @@ export function buildPrompt(ctx: PromptContext): string {
     );
   }
 
+  if (ctx.identity && ctx.identity.status !== 'verified') {
+    sections.push(
+      [
+        '--- IDENTITY NOT VERIFIED ---',
+        "The sender's email is not on any Shopify account we could verify, so no account data is shown above.",
+        'Do NOT reveal, confirm or guess any order, address, subscription or payment details, and do not take or promise any account action (cancellation, refund, address change).',
+        ctx.identity.hasCandidate
+          ? 'A possible account match was found from details in their message; a human agent must confirm it in the Customer 360 tab before account details can be used.'
+          : 'If the request needs account data, ask for the order number and the email used at checkout.',
+      ].join('\n'),
+    );
+  }
+
+  if (ctx.forAgentBot && ctx.channel === 'Channel::Email') {
+    sections.push(
+      [
+        '--- ACCOUNT ACTIONS (EMAIL) ---',
+        'This conversation is by email. Email sender addresses can be forged, so you cannot cancel or change a subscription here.',
+        'If the customer wants to cancel, reply with the self-service cancellation link (your reply goes to the email address on file).',
+        'Never say a subscription has been cancelled.',
+      ].join('\n'),
+    );
+  }
+
   if (ctx.lookupGuidance && ctx.lookupGuidance.trim()) {
     sections.push(`--- CUSTOMER NOT MATCHED ---\n${ctx.lookupGuidance.trim()}`);
   }
@@ -77,9 +113,6 @@ function buildCustomerSection(ctx: PromptContext): string {
   const totalOrders = ctx.orders.length;
   const subscriptionOrders = countSubscriptionOrders(ctx.orders);
 
-  const totalSpent = ctx.orders
-    .reduce((sum, o) => sum + parseFloat(o.total_price || '0'), 0)
-    .toFixed(2);
   const currency = ctx.orders[0]?.currency ?? ctx.shopifyCustomer?.currency ?? 'EUR';
 
   const address = ctx.shopifyCustomer?.default_address
@@ -90,7 +123,7 @@ function buildCustomerSection(ctx: PromptContext): string {
     `Customer: ${name} (${email})`,
     `Conversation: This is ${conversationType} (conversation #${ctx.conversationId}).`,
     `Total orders: ${totalOrders}, of which ${subscriptionOrders} are subscription orders.`,
-    `Lifetime value: ${totalSpent} ${currency}`,
+    `Lifetime value (net of refunds): ${formatLifetimeValue(ctx.orders, currency)}`,
     `Shipping address: ${address}`,
   ];
 
