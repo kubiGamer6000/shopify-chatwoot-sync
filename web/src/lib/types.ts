@@ -92,8 +92,25 @@ export interface SubscriptionDTO {
   lines: SubscriptionLineDTO[];
 }
 
+export type LinkStatus = 'verified' | 'suggested' | 'none';
+
+export interface CustomerLink {
+  status: LinkStatus;
+  basis: string | null;
+  suggestion: { email: string; basis: string } | null;
+}
+
+export interface LifetimeValue {
+  currency: string;
+  gross: string;
+  refunded: string;
+  net: string;
+}
+
 export interface CustomerProfile {
   found: boolean;
+  link?: CustomerLink;
+  contact?: { id: number; name: string | null; email: string | null };
   customer: {
     shopifyCustomerId: number | null;
     name: string | null;
@@ -106,6 +123,7 @@ export interface CustomerProfile {
     totalOrders: number;
     totalSpent: string;
     currency: string;
+    lifetimeValue?: LifetimeValue[];
     subscriptionOrderCount: number;
     activeSubscriptionCount: number;
   };
@@ -151,6 +169,8 @@ export interface ResolvedContext {
   shopifyCustomerId: string | null;
   email: string | null;
   contactName: string | null;
+  currentAgentId: number | null;
+  currentAgentName: string | null;
 }
 
 export interface ConversationHistoryItem {

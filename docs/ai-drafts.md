@@ -58,9 +58,7 @@ Customers often write in from a different address than the one on their Shopify 
 | `search_customer_by_email` | Look up a Shopify customer by an alternate email the customer provided. |
 | `search_customer_by_order_number` | Look up an order by number (`#11696`) and resolve the owning customer. |
 
-It calls a tool only when the message clearly contains a usable email/order number. On a successful match (≥1 order) it writes `shopify_email_link` back to the contact and the draft is regenerated with full context. If nothing usable is found, a `--- CUSTOMER NOT MATCHED ---` block instructs the AI to ask for an order number / original email **only when the request needs order data**.
-
-A **negative-match cache** (Firestore, keyed by contact + message hash, 12h TTL) prevents re-running this expensive loop for redeliveries/regenerations of the same message ([caching-and-storage.md](caching-and-storage.md)).
+> **Changed (security hardening):** the Claude matcher no longer exists and nothing is linked automatically. An email or order number found in the message becomes a **pending suggestion** on the contact that an agent confirms in the Customer 360 tab. Until then the AI sees no order data for the contact. See [security.md](security.md#1-linking-a-chatwoot-contact-to-a-shopify-customer).
 
 ## Debug mode & failure handling
 

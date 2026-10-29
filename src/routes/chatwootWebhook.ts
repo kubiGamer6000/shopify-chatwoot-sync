@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { env } from '../config/env.js';
+import { verifyChatwootWebhook } from '../middleware/chatwootWebhookAuth.js';
 import { logger } from '../utils/logger.js';
 import { postAiDraft } from '../services/aiDraft.js';
 import { claimOnce } from '../services/cache.js';
@@ -12,14 +12,8 @@ const router = Router();
 // Idempotency window for Chatwoot message-webhook redeliveries.
 const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 
-router.post('/', (req: Request, res: Response) => {
+router.post('/', verifyChatwootWebhook('account'), (req: Request, res: Response) => {
   res.status(200).json({ received: true });
-
-  const secret = req.query['secret'] as string | undefined;
-  if (env.chatwootWebhookSecret && secret !== env.chatwootWebhookSecret) {
-    logger.warn('Chatwoot webhook rejected: invalid secret');
-    return;
-  }
 
   const payload = req.body as ChatwootWebhookPayload;
 
@@ -44,12 +38,13 @@ router.post('/', (req: Request, res: Response) => {
   logger.info('Chatwoot webhook: incoming message', {
     conversationId: payload.conversation.id,
     senderId: payload.sender.id,
-    senderEmail: payload.sender.email,
   });
 
   void (async () => {
     // Skip duplicate deliveries of the same message so we never post two drafts
-    // for one customer message (fail-open when no cache is configured).
+    // for one customer message. Drafts are private notes (never sent to the
+    // customer), so when Firestore is down this proceeds on the in-process
+    // dedupe and raises an alert instead of switching dedupe off silently.
     const fresh = await claimOnce('wh-draft', String(payload.id), MESSAGE_DEDUPE_TTL_MS);
     if (!fresh) {
       logger.info('Duplicate draft webhook delivery, skipping', {

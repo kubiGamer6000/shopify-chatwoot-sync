@@ -7,7 +7,13 @@ import {
 } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
 import { getSubscriptionsByEmail } from './skio.js';
-import { formatAddress, countSubscriptionOrders } from '../utils/formatters.js';
+import {
+  formatAddress,
+  countSubscriptionOrders,
+  lifetimeValue,
+  fromMinorUnits,
+} from '../utils/formatters.js';
+import type { ContactResolution, LinkStatus, LinkBasis, LinkSuggestion } from './contactLink.js';
 import type {
   ShopifyCustomer,
   ShopifyOrder,
@@ -89,8 +95,24 @@ export interface SubscriptionDTO {
   lines: SubscriptionLineDTO[];
 }
 
+export interface LifetimeValueDTO {
+  currency: string;
+  gross: string;
+  refunded: string;
+  net: string;
+}
+
+export interface CustomerLinkDTO {
+  /** verified = safe to act on; suggested = agent must confirm first. */
+  status: LinkStatus;
+  basis: LinkBasis;
+  /** A candidate account the agent can confirm with one click. */
+  suggestion: LinkSuggestion | null;
+}
+
 export interface CustomerProfile {
   found: boolean;
+  link?: CustomerLinkDTO;
   customer: {
     shopifyCustomerId: number | null;
     name: string | null;
@@ -101,8 +123,11 @@ export interface CustomerProfile {
   };
   summary: {
     totalOrders: number;
+    /** Net (after refunds) total in the main currency. Kept for compatibility. */
     totalSpent: string;
     currency: string;
+    /** Per-currency lifetime value, net of refunds (never mixes currencies). */
+    lifetimeValue: LifetimeValueDTO[];
     subscriptionOrderCount: number;
     activeSubscriptionCount: number;
   };
@@ -237,6 +262,23 @@ function buildSubscriptionDTO(sub: SkioSubscription): SubscriptionDTO {
   };
 }
 
+/**
+ * Builds the tab's profile from an already-resolved contact (see
+ * contactLink.ts). Subscriptions are looked up by the RESOLVED customer's
+ * email only — never by an email supplied by the browser.
+ */
+export async function buildCustomerProfile(resolution: ContactResolution): Promise<CustomerProfile> {
+  const profile = await profileFor(resolution.customer, resolution.orders, resolution.customerEmail);
+  return {
+    ...profile,
+    link: {
+      status: resolution.status,
+      basis: resolution.basis,
+      suggestion: resolution.suggestion,
+    },
+  };
+}
+
 async function resolveCustomerAndOrders(
   shopifyCustomerId: number | null,
   email: string | null,
@@ -268,7 +310,6 @@ async function resolveCustomerAndOrders(
       }
     } catch (err) {
       logger.warn('Failed to resolve customer by email', {
-        email,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -277,6 +318,7 @@ async function resolveCustomerAndOrders(
   return { customer, orders };
 }
 
+/** Script/diagnostic helper (not used by the tab): looks up by id or email. */
 export async function getCustomerProfile(params: {
   shopifyCustomerId?: string | number | null;
   email?: string | null;
@@ -285,14 +327,19 @@ export async function getCustomerProfile(params: {
     ? Number(params.shopifyCustomerId)
     : null;
   const requestedEmail = params.email?.trim() || null;
-
   const { customer, orders } = await resolveCustomerAndOrders(
     shopifyCustomerId,
     requestedEmail,
   );
+  return profileFor(customer, orders, customer?.email || requestedEmail, shopifyCustomerId);
+}
 
-  const resolvedEmail = customer?.email || requestedEmail;
-
+async function profileFor(
+  customer: ShopifyCustomer | null,
+  orders: ShopifyOrder[],
+  resolvedEmail: string | null,
+  shopifyCustomerId: number | null = null,
+): Promise<CustomerProfile> {
   // Fetch live tracking + subscriptions in parallel.
   const sortedOrders = [...orders].sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -324,10 +371,10 @@ export async function getCustomerProfile(params: {
   const orderDTOs = sortedOrders.map((o) => buildOrderDTO(o, trackingByNumber));
   const subscriptionDTOs = subscriptions.map(buildSubscriptionDTO);
 
-  const totalSpent = orders
-    .reduce((sum, o) => sum + parseFloat(o.total_price || '0'), 0)
-    .toFixed(2);
-  const currency = sortedOrders[0]?.currency ?? customer?.currency ?? 'EUR';
+  const ltv = lifetimeValue(orders);
+  const primary = ltv[0];
+  const currency = primary?.currency ?? sortedOrders[0]?.currency ?? customer?.currency ?? 'EUR';
+  const totalSpent = primary ? fromMinorUnits(primary.netMinor) : '0.00';
 
   const found = Boolean(customer || orders.length > 0 || subscriptions.length > 0);
 
@@ -336,26 +383,32 @@ export async function getCustomerProfile(params: {
       ? [customer.first_name, customer.last_name].filter(Boolean).join(' ')
       : null;
 
+  const customerId = customer?.id ?? shopifyCustomerId;
+
   return {
     found,
     customer: {
-      shopifyCustomerId: customer?.id ?? shopifyCustomerId,
+      shopifyCustomerId: customerId,
       name,
       email: resolvedEmail,
       phone: customer?.phone ?? null,
       address: customer?.default_address
         ? formatAddress(customer.default_address)
         : null,
-      shopifyUrl: customer?.id
-        ? `https://${env.shopifyStoreDomain}/admin/customers/${customer.id}`
-        : shopifyCustomerId
-          ? `https://${env.shopifyStoreDomain}/admin/customers/${shopifyCustomerId}`
-          : null,
+      shopifyUrl: customerId
+        ? `https://${env.shopifyStoreDomain}/admin/customers/${customerId}`
+        : null,
     },
     summary: {
       totalOrders: orders.length,
       totalSpent,
       currency,
+      lifetimeValue: ltv.map((t) => ({
+        currency: t.currency,
+        gross: fromMinorUnits(t.grossMinor),
+        refunded: fromMinorUnits(t.refundedMinor),
+        net: fromMinorUnits(t.netMinor),
+      })),
       subscriptionOrderCount: countSubscriptionOrders(orders),
       activeSubscriptionCount: subscriptionDTOs.filter((s) => s.isActive).length,
     },

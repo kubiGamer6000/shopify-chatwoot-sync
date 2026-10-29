@@ -78,6 +78,20 @@ export interface ShopifyOrder {
   order_status_url?: string;
   cancel_reason?: string | null;
   cancelled_at?: string | null;
+  refunds?: ShopifyRefund[];
+}
+
+export interface ShopifyRefundTransaction {
+  kind?: string;
+  status?: string;
+  amount?: string;
+  currency?: string;
+}
+
+export interface ShopifyRefund {
+  id?: number;
+  created_at?: string;
+  transactions?: ShopifyRefundTransaction[];
 }
 
 // --- Chatwoot Types ---
@@ -99,6 +113,17 @@ export interface ChatwootCustomAttributes {
   // When present, this email is used for all Shopify lookups instead of the
   // contact's default email.
   shopify_email_link: string;
+  // Set only when an agent confirmed `shopify_email_link` in the Customer 360
+  // tab. The signature (HMAC with a server secret) makes the confirmation
+  // tamper-proof: anything else (AI matcher, contact edits, widget SDK) leaves
+  // the link unverified.
+  shopify_email_link_confirmed_by: string;
+  shopify_email_link_confirmed_at: string;
+  shopify_email_link_sig: string;
+  // A pending suggestion found in the customer's message (email / order
+  // number). Never used for lookups by automation; an agent confirms it.
+  shopify_email_link_suggested: string;
+  shopify_email_link_suggested_basis: string;
 }
 
 export interface ChatwootContactPayload {

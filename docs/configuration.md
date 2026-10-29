@@ -24,10 +24,16 @@ Validated/typed in [`src/config/env.ts`](../src/config/env.ts).
 | `CLAUDE_MODEL` | No | Model for drafts, responder agent and Shopify matcher (default `claude-sonnet-5`) |
 | `CLAUDE_CLASSIFIER_MODEL` | No | Model for classifier + holding replies (default `claude-sonnet-5`) |
 | `CLAUDE_RESPONDER_PROMPT` | No | Override for the AgentBot responder prompt. Falls back to `src/config/responderPrompt.txt` |
-| `CHATWOOT_WEBHOOK_SECRET` | No | If set, the draft webhook URL must include `?secret=<value>` |
-| `CHATWOOT_AGENT_BOT_SECRET` | No | If set, the AgentBot webhook URL must include `?secret=<value>` |
+| `CHATWOOT_WEBHOOK_SIGNING_SECRET` | Yes* | HMAC secret of the account webhook (verifies `X-Chatwoot-Signature`). *Webhooks are rejected without it unless the legacy flag below is on |
+| `CHATWOOT_AGENT_BOT_SIGNING_SECRET` | Yes* | HMAC secret of the Agent Bot |
+| `LEGACY_WEBHOOK_QUERY_SECRET_ENABLED` | No | Transition only: accept `?secret=` (`CHATWOOT_WEBHOOK_SECRET` / `CHATWOOT_AGENT_BOT_SECRET`) when no signing secret is set. Default `false` |
+| `CHATWOOT_WEBHOOK_SECRET` | No | Legacy `?secret=` value for the draft webhook |
+| `CHATWOOT_AGENT_BOT_SECRET` | No | Legacy `?secret=` value for the AgentBot webhook |
+| `APP_SESSION_SECRET` | Recommended | Signs Customer 360 sessions and agent link confirmations ([security.md](security.md)) |
+| `ALERT_WEBHOOK_URL` | No | Slack-compatible webhook for operational alerts |
 | `AGENT_BOT_HOLDING_REPLY` | No | `true`/`false` (default `true`). When `false`, escalations send no holding reply |
-| `DASHBOARD_APP_TOKEN` | No | Gates `/app` and `/app/api/*` |
+| `DASHBOARD_APP_TOKEN` | No | Legacy shared tab token; accepted only when `LEGACY_DASHBOARD_TOKEN_ENABLED=true` (transition) |
+| `LEGACY_DASHBOARD_TOKEN_ENABLED` | No | Default `false`. See [security.md](security.md#3-customer-360-tab-authentication) |
 | `ADMIN_BOOTSTRAP_EMAILS` | No | Comma-separated Google account emails that are always admins in the [Admin Dashboard](admin-dashboard.md) (bootstrap) |
 | `DEBUG` | No | If truthy, posts the full Claude prompt as an extra private note (dev only) |
 

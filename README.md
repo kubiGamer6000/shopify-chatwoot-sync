@@ -23,6 +23,7 @@ It runs as a single DigitalOcean app and uses Shopify, Chatwoot, Anthropic, 17tr
 | [docs/caching-and-storage.md](docs/caching-and-storage.md) | Firestore caches, idempotency, collections, audit logs |
 | [docs/configuration.md](docs/configuration.md) | Environment variables + AI prompt/model/behaviour config |
 | [docs/deployment.md](docs/deployment.md) | Service setup + DigitalOcean deployment + verification checklist |
+| [docs/security.md](docs/security.md) | Contact-link verification, tab sign-in, webhook auth, fail-safe, audit log |
 
 ## Quick start
 
@@ -30,6 +31,13 @@ It runs as a single DigitalOcean app and uses Shopify, Chatwoot, Anthropic, 17tr
 cp .env.example .env      # fill in values — see docs/configuration.md
 npm install
 npm run dev               # server in tsx watch mode
+```
+
+Tests (Node's built-in runner; every external service is faked) and type checks:
+
+```bash
+npm test
+npm run typecheck
 ```
 
 Build everything (both SPAs + server) and run production:

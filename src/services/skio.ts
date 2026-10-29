@@ -90,14 +90,17 @@ export async function getSubscriptionsByEmail(
     );
   } catch (err) {
     logger.warn('Failed to fetch Skio subscriptions', {
-      email,
       error: err instanceof Error ? err.message : String(err),
     });
     return [];
   }
 }
 
-async function fetchSubscriptionsLive(
+/**
+ * Live (uncached) read, used right before an action so it acts on Skio's
+ * current state, not a cached copy. Throws on Skio errors.
+ */
+export async function fetchSubscriptionsLive(
   email: string,
 ): Promise<SkioSubscription[]> {
   const data = await skioQuery<{ Subscriptions: SkioSubscription[] }>(
@@ -105,7 +108,7 @@ async function fetchSubscriptionsLive(
     { email },
   );
   const subs = data.Subscriptions ?? [];
-  logger.debug(`Fetched ${subs.length} Skio subscriptions`, { email });
+  logger.debug(`Fetched ${subs.length} Skio subscriptions`);
   return subs;
 }
 
@@ -117,19 +120,32 @@ const CANCEL_SUBSCRIPTION = `
   }
 `;
 
-export async function cancelSubscription(subscriptionId: string): Promise<boolean> {
+export interface CancelOptions {
+  /**
+   * Skio's customer notice (`shouldSendNotif`): the customer gets Skio's
+   * cancellation email. Defaults to true so cancellations are never silent.
+   */
+  notifyCustomer?: boolean;
+}
+
+export async function cancelSubscription(
+  subscriptionId: string,
+  opts: CancelOptions = {},
+): Promise<boolean> {
   // `permanentlyCancel: true` is rejected by Skio's public API
   // ("Permanent cancellation is not available for public API"), so we issue a
-  // standard cancellation. Skio's `cancelSubscription` mutation does not accept
-  // a free-text cancellation reason — reasons are only captured through the
-  // customer-facing Cancel Flow — so there is nothing to set here.
+  // standard cancellation. Skio's CancelSubscriptionInput has no reason field
+  // (checked by schema introspection: cancelSessionId,
+  // invokeSubscriptionCancelJourneys, permanentlyCancel, shouldSendNotif,
+  // subscriptionId), so callers record the reason in our audit log and as a
+  // private note on the conversation.
   const data = await skioQuery<{ cancelSubscription: { ok: boolean } }>(
     CANCEL_SUBSCRIPTION,
     {
       input: {
         subscriptionId,
         permanentlyCancel: false,
-        shouldSendNotif: false,
+        shouldSendNotif: opts.notifyCustomer ?? true,
       },
     },
   );
@@ -158,14 +174,17 @@ export interface CancelByEmailResult {
  */
 export async function cancelActiveSubscriptionsByEmail(
   email: string,
-): Promise<CancelByEmailResult> {
-  const result: CancelByEmailResult = {
+  opts: CancelOptions = {},
+): Promise<CancelByEmailResult & { cancelledIds: string[] }> {
+  const result: CancelByEmailResult & { cancelledIds: string[] } = {
     activeFound: 0,
     cancelled: 0,
     cancelledTitles: [],
+    cancelledIds: [],
   };
 
-  const subs = await getSubscriptionsByEmail(email);
+  // Live read: act on Skio's current state, never a cached copy.
+  const subs = await fetchSubscriptionsLive(email);
   const active = subs.filter(
     (s) => ACTIVE_STATUSES.has(s.status) && !s.cancelledAt,
   );
@@ -173,9 +192,10 @@ export async function cancelActiveSubscriptionsByEmail(
 
   for (const sub of active) {
     try {
-      const ok = await cancelSubscription(sub.id);
+      const ok = await cancelSubscription(sub.id, opts);
       if (ok) {
         result.cancelled += 1;
+        result.cancelledIds.push(sub.id);
         const title =
           sub.SubscriptionLines?.[0]?.ProductVariant?.Product?.title ?? null;
         if (title) result.cancelledTitles.push(title);
@@ -183,7 +203,6 @@ export async function cancelActiveSubscriptionsByEmail(
     } catch (err) {
       logger.warn('Failed to cancel a Skio subscription', {
         subscriptionId: sub.id,
-        email,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -193,7 +212,6 @@ export async function cancelActiveSubscriptionsByEmail(
   if (result.cancelled > 0) await invalidateSubscriptionsCache(email);
 
   logger.info('Cancelled active subscriptions by email', {
-    email,
     activeFound: result.activeFound,
     cancelled: result.cancelled,
   });

@@ -71,4 +71,30 @@ export const env = {
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean),
+
+  // --- Security hardening (see docs/security.md) ---
+
+  // Secret for signing agent sessions and agent-confirmed contact links. When
+  // unset, a key is derived from CHATWOOT_API_TOKEN (so the app keeps working),
+  // but setting a dedicated random value is strongly recommended.
+  appSessionSecret: process.env.APP_SESSION_SECRET || '',
+  // Transition only: lets the old `/app?token=<DASHBOARD_APP_TOKEN>` URL keep
+  // working. Default OFF. Turn on only while the Chatwoot Dashboard App URL is
+  // being switched, then turn off and rotate DASHBOARD_APP_TOKEN.
+  legacyDashboardTokenEnabled: flag(process.env.LEGACY_DASHBOARD_TOKEN_ENABLED, false),
+  // Chatwoot webhook HMAC secrets (the "Secret" Chatwoot shows for the account
+  // webhook / agent bot). Verified against X-Chatwoot-Signature.
+  chatwootWebhookSigningSecret: process.env.CHATWOOT_WEBHOOK_SIGNING_SECRET || '',
+  chatwootAgentBotSigningSecret: process.env.CHATWOOT_AGENT_BOT_SIGNING_SECRET || '',
+  // Transition only: accept the old `?secret=` query string when no signing
+  // secret is configured (constant-time compare). Default OFF.
+  legacyWebhookQuerySecretEnabled: flag(process.env.LEGACY_WEBHOOK_QUERY_SECRET_ENABLED, false),
+  // Optional Slack-compatible incoming webhook URL for operational alerts
+  // (dedupe store down, audit writes failing, ...). Alerts are always logged.
+  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL || '',
 };
+
+function flag(raw: string | undefined, fallback: boolean): boolean {
+  if (raw == null || raw.trim() === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}

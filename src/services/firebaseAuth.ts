@@ -28,7 +28,8 @@ export async function verifyIdToken(
     const decoded: DecodedIdToken = await getAuth(app).verifyIdToken(idToken);
     return {
       uid: decoded.uid,
-      email: decoded.email ?? null,
+      // Only a verified email may match ADMIN_BOOTSTRAP_EMAILS / be shown as identity.
+      email: decoded.email_verified ? (decoded.email ?? null) : null,
       name: (decoded.name as string | undefined) ?? null,
     };
   } catch (err) {
