@@ -120,10 +120,9 @@ export interface ChatwootCustomAttributes {
   shopify_email_link_confirmed_by: string;
   shopify_email_link_confirmed_at: string;
   shopify_email_link_sig: string;
-  // A pending suggestion found in the customer's message (email / order
-  // number). Never used for lookups by automation; an agent confirms it.
-  shopify_email_link_suggested: string;
-  shopify_email_link_suggested_basis: string;
+  // Signature from scripts/snapshotLegacyLinks.ts: this link predates the
+  // security change (old AI matcher) and may be offered to agents to confirm.
+  shopify_email_link_legacy_sig: string;
 }
 
 export interface ChatwootContactPayload {

@@ -57,8 +57,12 @@ async function request<T>(
   });
 
   if (res.status === 401) {
-    if (!retried && getSession() && (await refreshSession())) {
-      return request<T>(path, opts, true);
+    if (!retried && getSession()) {
+      const refreshed = await refreshSession();
+      if (refreshed.session) return request<T>(path, opts, true);
+      if (refreshed.transient) {
+        throw new Error('Could not renew your session right now. Try again in a moment.');
+      }
     }
     throw new AuthRequiredError();
   }

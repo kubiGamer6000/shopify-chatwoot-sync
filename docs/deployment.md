@@ -43,7 +43,7 @@ Generate an API key → `SKIO_API_KEY`.
 Provide a Firebase service account, base64-encode it, set `FIREBASE_BASE64_SERVICE_ACCOUNT`. Enables caching, summaries, drafts, audit logs, and the admin dashboard's config/users. See [caching-and-storage.md](caching-and-storage.md).
 
 ### Dashboard App
-Set `APP_SESSION_SECRET`, deploy, then register in Chatwoot with `https://<domain>/app` (no token; agents connect with their own Chatwoot token) ([dashboard-app.md](dashboard-app.md)).
+Set `APP_SESSION_SECRET` and `LINK_CONFIRMATION_SECRET` (required), deploy, then register in Chatwoot with `https://<domain>/app` (no token; agents connect with their own Chatwoot token) ([dashboard-app.md](dashboard-app.md)).
 
 ### Admin Control Dashboard
 Set `ADMIN_BOOTSTRAP_EMAILS` and the `VITE_FIREBASE_*` build vars, enable Google sign-in in the Firebase console. See [admin-dashboard.md](admin-dashboard.md).

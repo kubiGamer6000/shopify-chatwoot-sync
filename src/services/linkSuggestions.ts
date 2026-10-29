@@ -53,37 +53,89 @@ export interface SuggestionDeps {
   searchOrderByName: (orderNumber: string) => Promise<ShopifyOrder | null>;
 }
 
+/** Customer-authored text to scan (incoming, non-private messages + subject). */
+export interface CustomerText {
+  kind: 'message' | 'subject';
+  messageId?: number | null;
+  createdAt?: string | null;
+  content: string;
+}
+
+function excerpt(text: string, needle: string): string {
+  const i = text.toLowerCase().indexOf(needle.toLowerCase());
+  if (i < 0) return text.slice(0, 120);
+  const start = Math.max(0, i - 50);
+  const end = Math.min(text.length, i + needle.length + 50);
+  return `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${end < text.length ? '…' : ''}`;
+}
+
 /**
- * Resolves the extracted candidates to a Shopify customer. Returns the first
- * hit as a suggestion (never links anything). Lookup failures are swallowed.
+ * Computes a suggestion LIVE from the customer's own messages (never from
+ * stored attributes), and reports which message contained it so the agent can
+ * check. Resolves to a Shopify customer; never links anything. Lookup failures
+ * are swallowed.
  */
 export async function findLinkSuggestion(
-  text: string,
+  texts: CustomerText[],
   contactEmail: string | null,
   deps: SuggestionDeps,
 ): Promise<LinkSuggestion | null> {
   const own = normalizeEmail(contactEmail);
-  const { emails, orderNumbers } = extractCandidates(text, own ? [own] : []);
 
-  for (const email of emails) {
-    try {
-      const customer = await findCustomerByExactEmail(deps, email);
-      if (customer) return { email, basis: 'Email address mentioned in the customer’s message' };
-    } catch {
-      // try the next candidate
+  for (const t of texts) {
+    const { emails } = extractCandidates(t.content, own ? [own] : []);
+    for (const email of emails) {
+      try {
+        const customer = await findCustomerByExactEmail(deps, email);
+        if (customer) {
+          return {
+            email,
+            basis: 'An email address the customer wrote in this conversation matches this Shopify customer',
+            source: { kind: t.kind, messageId: t.messageId ?? null, createdAt: t.createdAt ?? null, excerpt: excerpt(t.content, email) },
+          };
+        }
+      } catch {
+        // try the next candidate
+      }
     }
   }
 
-  for (const n of orderNumbers) {
-    try {
-      const order = await deps.searchOrderByName(n);
-      const email = normalizeEmail(order?.customer?.email ?? order?.email);
-      if (order && email && email !== own) {
-        return { email, basis: `Order ${order.name} mentioned in the customer’s message` };
+  for (const t of texts) {
+    const { orderNumbers } = extractCandidates(t.content, own ? [own] : []);
+    for (const n of orderNumbers) {
+      try {
+        const order = await deps.searchOrderByName(n);
+        const email = normalizeEmail(order?.customer?.email ?? order?.email);
+        if (order && email && email !== own) {
+          return {
+            email,
+            basis: 'An order number the customer wrote in this conversation belongs to this Shopify customer',
+            source: { kind: t.kind, messageId: t.messageId ?? null, createdAt: t.createdAt ?? null, excerpt: excerpt(t.content, n) },
+          };
+        }
+      } catch {
+        // try the next candidate
       }
-    } catch {
-      // try the next candidate
     }
   }
   return null;
+}
+
+/** Builds the customer-authored texts from Chatwoot messages (+ subject). */
+export function customerTexts(
+  messages: { id: number; message_type: number; private: boolean; content: string | null; created_at: number }[],
+  subject: unknown,
+): CustomerText[] {
+  const out: CustomerText[] = [];
+  if (typeof subject === 'string' && subject.trim()) out.push({ kind: 'subject', content: subject });
+  for (const m of [...messages].sort((a, b) => a.created_at - b.created_at)) {
+    if (m.message_type !== 0 || m.private || !m.content) continue;
+    out.push({
+      kind: 'message',
+      messageId: m.id,
+      createdAt: new Date(m.created_at * 1000).toISOString(),
+      content: m.content,
+    });
+  }
+  return out;
 }

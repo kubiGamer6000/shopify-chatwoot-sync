@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Inbox, KeyRound, Link2, Loader2, RefreshCw, SearchX } from 'lucide-react';
 import { useChatwootContext } from '@/lib/chatwoot';
-import { clearSession, connect, getLegacyToken, getSession } from '@/lib/auth';
+import { clearSession, connect, getLegacyToken, getSession, signOut } from '@/lib/auth';
 import {
   AuthRequiredError,
   confirmLink,
@@ -9,6 +9,7 @@ import {
   setClaimedAgentId,
 } from '@/lib/api';
 import { useToast } from '@/components/Toast';
+import { formatDateTime } from '@/lib/format';
 import type { CustomerProfile } from '@/lib/types';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -43,9 +44,21 @@ function Dashboard() {
 
   const conversationId = context?.conversationId ?? null;
 
+  const [mismatchNotice, setMismatchNotice] = useState<string | null>(null);
+
   useEffect(() => {
     setClaimedAgentId(context?.currentAgentId ?? null);
-  }, [context?.currentAgentId]);
+    // Someone else is using Chatwoot in this browser: drop the stored session
+    // and require them to connect as themselves.
+    const s = getSession();
+    if (s && context?.currentAgentId && s.agent.id !== context.currentAgentId) {
+      clearSession();
+      setMismatchNotice(
+        `This browser was connected as ${s.agent.name ?? `agent #${s.agent.id}`}, but Chatwoot shows ${context.currentAgentName ?? 'another agent'}. Please connect as yourself.`,
+      );
+      setSignedIn(false);
+    }
+  }, [context?.currentAgentId, context?.currentAgentName]);
 
   useEffect(() => {
     if (!signedIn || !context) return;
@@ -87,38 +100,31 @@ function Dashboard() {
   if (!signedIn) {
     return (
       <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
-        <ConnectState onConnected={() => setSignedIn(true)} />
+        {mismatchNotice && (
+          <div className="border-warning/40 bg-warning/10 rounded-lg border px-3 py-2.5 text-sm">
+            {mismatchNotice}
+          </div>
+        )}
+        <ConnectState
+          onConnected={() => {
+            setMismatchNotice(null);
+            setSignedIn(true);
+          }}
+        />
       </div>
     );
   }
 
   const session = getSession();
-  const agentMismatch =
-    session && context?.currentAgentId && session.agent.id !== context.currentAgentId;
 
   return (
     <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
-      {agentMismatch && (
-        <div className="border-warning/40 bg-warning/10 flex items-start justify-between gap-2 rounded-lg border px-3 py-2.5 text-sm">
-          <span>
-            Connected as {session.agent.name ?? `agent #${session.agent.id}`}, but Chatwoot
-            shows {context?.currentAgentName ?? 'another agent'}.
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              clearSession();
-              setSignedIn(false);
-            }}
-          >
-            Reconnect
-          </Button>
-        </div>
-      )}
       {!session && getLegacyToken() && (
         <div className="border-warning/40 bg-warning/10 flex items-start justify-between gap-2 rounded-lg border px-3 py-2.5 text-sm">
-          <span>Using the old shared link. Connect with your own Chatwoot token.</span>
+          <span>
+            Using the old shared link (read-only: replies and cancellations are disabled). Connect
+            with your own Chatwoot token.
+          </span>
           <Button variant="outline" size="sm" onClick={() => setSignedIn(false)}>
             Connect
           </Button>
@@ -160,8 +166,7 @@ function Dashboard() {
             type="button"
             className="underline"
             onClick={() => {
-              clearSession();
-              setSignedIn(false);
+              void signOut().then(() => setSignedIn(false));
             }}
           >
             Sign out
@@ -190,6 +195,14 @@ function LinkSuggestionBanner({
   const [busy, setBusy] = useState(false);
   const link = profile?.link;
   const suggestion = link?.suggestion;
+  if (link?.ignoredAttributes && !suggestion) {
+    return (
+      <div className="border-warning/40 bg-warning/10 rounded-lg border px-3 py-2.5 text-xs">
+        This contact has a Shopify link set outside Customer 360. It was ignored, because contact
+        details can be edited by the customer.
+      </div>
+    );
+  }
   if (!link || !suggestion || !conversationId) return null;
   const isCurrent = link.status === 'suggested';
 
@@ -217,14 +230,29 @@ function LinkSuggestionBanner({
           <p className="text-muted-foreground">
             {suggestion.basis}: <span className="break-all">{suggestion.email}</span>
           </p>
+          {suggestion.source?.excerpt && (
+            <p className="text-muted-foreground mt-1 text-xs">
+              {suggestion.source.kind === 'subject' ? 'In the email subject' : 'In the customer’s message'}
+              {suggestion.source.createdAt ? ` of ${formatDateTime(suggestion.source.createdAt)}` : ''}:{' '}
+              <q className="italic">{suggestion.source.excerpt}</q>
+            </p>
+          )}
           <p className="text-muted-foreground mt-1 text-xs">
-            Check the sender is this customer (name + address or order) before confirming.
-            Until confirmed, the AI won’t share account details and cancellations are blocked.
+            Anyone can type an email or order number, and customers can change their own contact
+            details. Check identity in the conversation itself (name + address or order details)
+            before confirming. Until confirmed, the AI won’t share account details and
+            cancellations are blocked.
           </p>
         </div>
       </div>
       <div>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void handleConfirm()}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || !getSession()}
+          title={getSession() ? undefined : 'Connect with your own Chatwoot token to confirm links'}
+          onClick={() => void handleConfirm()}
+        >
           {busy && <RefreshCw className="size-4 animate-spin" />}
           Confirm link
         </Button>
@@ -289,7 +317,7 @@ function Loaded({
             subscriptions={profile.subscriptions}
             currency={profile.summary.currency}
             conversationId={context.conversationId}
-            canCancel={profile.link?.status === 'verified'}
+            canCancel={profile.link?.status === 'verified' && getSession() !== null}
             onChanged={onChanged}
           />
         </TabsContent>

@@ -10,7 +10,8 @@
 import { AxiosError } from 'axios';
 import { env } from '../config/env.js';
 import { getConversationDetails } from './chatwootConversation.js';
-import { getContact } from './chatwoot.js';
+import { getContact, chatwootClient } from './chatwoot.js';
+import { logger } from '../utils/logger.js';
 import { fetchCustomer, fetchCustomerOrders, searchCustomerByEmail, searchOrderByName } from './shopify.js';
 import type { LinkDeps } from './contactLink.js';
 import type { SuggestionDeps } from './linkSuggestions.js';
@@ -48,7 +49,59 @@ export function parseConversationId(raw: unknown): number | null {
   return n > 0 ? n : null;
 }
 
-export async function loadConversationScope(conversationId: number): Promise<ConversationScope> {
+// --- Per-inbox authorization -----------------------------------------------------
+
+const INBOX_MEMBERS_TTL_MS = 5 * 60 * 1000;
+const inboxMembersCache = new Map<number, { at: number; ids: Set<number> }>();
+
+export type FetchInboxMembers = (inboxId: number) => Promise<number[]>;
+
+const defaultFetchInboxMembers: FetchInboxMembers = async (inboxId) => {
+  const res = await chatwootClient.get<{ payload?: { id: number }[] } | { id: number }[]>(
+    `/inbox_members/${inboxId}`,
+  );
+  const list = Array.isArray(res.data) ? res.data : (res.data.payload ?? []);
+  return list.map((a) => a.id);
+};
+
+/** Test helper. */
+export function resetInboxMembersCache(): void {
+  inboxMembersCache.clear();
+}
+
+/**
+ * An agent may only open conversations of inboxes they are a member of
+ * (Chatwoot administrators see all inboxes, as in Chatwoot itself). Fails
+ * closed if the membership can't be read.
+ */
+export async function agentCanAccessInbox(
+  agent: { id: number; role: string | null },
+  inboxId: number | null | undefined,
+  fetchMembers: FetchInboxMembers = defaultFetchInboxMembers,
+): Promise<boolean> {
+  if (agent.role === 'administrator') return true;
+  if (!inboxId) return false;
+  const now = Date.now();
+  let entry = inboxMembersCache.get(inboxId);
+  if (!entry || now - entry.at > INBOX_MEMBERS_TTL_MS) {
+    try {
+      entry = { at: now, ids: new Set(await fetchMembers(inboxId)) };
+      inboxMembersCache.set(inboxId, entry);
+    } catch (err) {
+      logger.warn('Could not read inbox members', {
+        inboxId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+  return entry.ids.has(agent.id);
+}
+
+export async function loadConversationScope(
+  conversationId: number,
+  agent?: { id: number; role: string | null; via: 'session' | 'legacy-token' },
+): Promise<ConversationScope> {
   let conversation: ChatwootConversation;
   try {
     conversation = await getConversationDetails(conversationId);
@@ -63,6 +116,9 @@ export async function loadConversationScope(conversationId: number): Promise<Con
     String(conversation.account_id) !== String(env.chatwootAccountId)
   ) {
     throw new ScopeError(403, 'Conversation belongs to another account');
+  }
+  if (agent?.via === 'session' && !(await agentCanAccessInbox(agent, conversation.inbox_id))) {
+    throw new ScopeError(403, 'You are not a member of this conversation’s inbox');
   }
   const contactId = conversation.meta?.sender?.id;
   if (!contactId) throw new ScopeError(404, 'Conversation has no contact');

@@ -73,16 +73,27 @@ export function getLegacyToken(): string | null {
 
 // --- Server calls -----------------------------------------------------------
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function post<T>(path: string, body: unknown, bearer?: string): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (bearer) headers['Authorization'] = `Bearer ${bearer}`;
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
     credentials: 'omit',
     cache: 'no-store',
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  if (!res.ok) throw new HttpError(res.status, data?.error || `Request failed (${res.status})`);
   return data;
 }
 
@@ -97,13 +108,19 @@ export async function connect(chatwootAccessToken: string): Promise<StoredSessio
   return session;
 }
 
-let refreshing: Promise<StoredSession | null> | null = null;
+export type RefreshResult = { session: StoredSession } | { session: null; transient: boolean };
 
-/** Exchanges the refresh token for a new session; null when it's no longer valid. */
-export function refreshSession(): Promise<StoredSession | null> {
+let refreshing: Promise<RefreshResult> | null = null;
+
+/**
+ * Exchanges the refresh token for a new session. The stored session is only
+ * dropped when the server says it is invalid (401); rate limits or a
+ * Chatwoot outage (429/503/network) keep it for the next try.
+ */
+export function refreshSession(): Promise<RefreshResult> {
   if (refreshing) return refreshing;
   const current = readStore();
-  if (!current) return Promise.resolve(null);
+  if (!current) return Promise.resolve({ session: null, transient: false });
   refreshing = post<StoredSession>('/app/auth/refresh', { refreshToken: current.refreshToken })
     .then((data) => {
       const session = {
@@ -112,16 +129,29 @@ export function refreshSession(): Promise<StoredSession | null> {
         agent: data.agent,
       };
       writeStore(session);
-      return session;
+      return { session } as RefreshResult;
     })
-    .catch(() => {
-      writeStore(null);
-      return null;
+    .catch((err: unknown) => {
+      if (err instanceof HttpError && err.status === 401) {
+        writeStore(null);
+        return { session: null, transient: false } as RefreshResult;
+      }
+      return { session: null, transient: true } as RefreshResult;
     })
     .finally(() => {
       refreshing = null;
     });
   return refreshing;
+}
+
+/** Signs out everywhere (revokes all of this agent's sessions) and forgets locally. */
+export async function signOut(): Promise<void> {
+  const current = readStore();
+  writeStore(null);
+  if (!current) return;
+  await post('/app/auth/signout', { refreshToken: current.refreshToken }, current.accessToken).catch(
+    () => undefined,
+  );
 }
 
 export interface AuthConfig {

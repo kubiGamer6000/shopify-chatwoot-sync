@@ -13,8 +13,10 @@ declare global {
   }
 }
 
-// Chatwoot signs `${timestamp}.${raw body}`; reject deliveries older than this.
-const MAX_SKEW_SECONDS = 5 * 60;
+// Chatwoot signs `${timestamp}.${raw body}`; reject deliveries older than
+// 5 minutes or more than 60 seconds in the future (clock drift).
+const MAX_AGE_SECONDS = 5 * 60;
+const MAX_FUTURE_SECONDS = 60;
 
 export type WebhookKind = 'account' | 'agentBot';
 
@@ -61,7 +63,8 @@ export function checkChatwootWebhook(
     const ts = req.header('x-chatwoot-timestamp');
     const sig = req.header('x-chatwoot-signature');
     if (!ts || !sig || !/^\d{1,12}$/.test(ts)) return { ok: false, reason: 'missing-signature' };
-    if (Math.abs(nowSeconds - Number(ts)) > MAX_SKEW_SECONDS) return { ok: false, reason: 'stale' };
+    const age = nowSeconds - Number(ts);
+    if (age > MAX_AGE_SECONDS || age < -MAX_FUTURE_SECONDS) return { ok: false, reason: 'stale' };
     if (!req.rawBody) return { ok: false, reason: 'no-raw-body' };
     const expected = `sha256=${hmacHex(signingSecret, `${ts}.${req.rawBody.toString('utf8')}`)}`;
     return constantTimeEqual(sig.trim(), expected)

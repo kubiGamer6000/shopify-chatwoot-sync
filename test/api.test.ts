@@ -12,6 +12,8 @@ import { on, resetFake, calls, type FakeRequest } from './helpers/fakeHttp.js';
 import { env } from '../src/config/env.js';
 import { mintToken } from '../src/security/session.js';
 import { resetMemoryClaims } from '../src/services/cache.js';
+import { resetInboxMembersCache } from '../src/services/conversationScope.js';
+import { resetGenerations } from '../src/security/agentGeneration.js';
 import { confirmationAttributes } from '../src/services/contactLink.js';
 import app from '../src/app.js';
 
@@ -41,20 +43,43 @@ const subsByEmail: Record<string, { id: string; status: string; cancelledAt: str
 };
 
 let contacts: Record<number, FakeContact>;
-const conversations: Record<number, number> = { 1: 501, 2: 502 }; // conversation -> contact
+// conversation -> contact, inbox, channel
+const conversations: Record<number, { contact: number; inbox: number; channel: string; hmac?: boolean; text: string }> = {
+  1: { contact: 501, inbox: 1, channel: 'Channel::WebWidget', hmac: false, text: 'hi, where is my order #11696?' },
+  2: { contact: 502, inbox: 1, channel: 'Channel::Email', text: 'please cancel' },
+  3: { contact: 503, inbox: 1, channel: 'Channel::WebWidget', hmac: false, text: 'cancel my sub' },
+  4: { contact: 502, inbox: 9, channel: 'Channel::Email', text: 'hello' },
+};
 
 function installFakes(): void {
   resetFake();
   contacts = {
-    501: { id: 501, email: 'stranger@evil.test', name: 'Stranger', custom_attributes: { shopify_email_link: 'victim@example.com' } },
+    // A widget visitor who planted link attributes through the public widget API.
+    501: {
+      id: 501,
+      email: 'stranger@evil.test',
+      name: 'Stranger',
+      custom_attributes: {
+        shopify_email_link: 'victim@example.com',
+        shopify_email_link_suggested: 'victim@example.com',
+        shopify_email_link_suggested_basis: 'Verified by support',
+        shopify_customer_id: '202',
+      },
+    },
     502: { id: 502, email: 'anna@example.com', name: 'Anna', custom_attributes: {} },
+    503: { id: 503, email: 'anna@example.com', name: 'Not really Anna', custom_attributes: {} },
   };
   on('GET', new RegExp(`${CW}/conversations/(\\d+)$`), (req) => {
     const id = Number(/conversations\/(\d+)$/.exec(req.url)![1]);
-    const contactId = conversations[id];
-    if (!contactId) return { status: 404 };
-    const c = contacts[contactId]!;
-    return { data: { id, account_id: 7, status: 'open', additional_attributes: {}, meta: { sender: { ...c } } } };
+    const conv = conversations[id];
+    if (!conv) return { status: 404 };
+    const c = contacts[conv.contact]!;
+    return {
+      data: {
+        id, account_id: 7, inbox_id: conv.inbox, status: 'open', additional_attributes: {},
+        meta: { sender: { ...c }, channel: conv.channel, hmac_verified: conv.hmac ?? false },
+      },
+    };
   });
   on('GET', new RegExp(`${CW}/contacts/(\\d+)$`), (req) => {
     const id = Number(/contacts\/(\d+)$/.exec(req.url)![1]);
@@ -66,9 +91,19 @@ function installFakes(): void {
     contacts[id]!.custom_attributes = { ...contacts[id]!.custom_attributes, ...(body.custom_attributes ?? {}) };
     return { data: { payload: contacts[id] } };
   });
-  on('GET', new RegExp(`${CW}/conversations/\\d+/messages$`), () => ({
-    data: { payload: [{ id: 1, message_type: 0, private: false, content: 'please cancel', created_at: 1 }] },
-  }));
+  on('GET', new RegExp(`${CW}/conversations/\\d+/messages$`), (req) => {
+    const id = Number(/conversations\/(\d+)\/messages$/.exec(req.url)![1]);
+    return { data: { payload: [{ id: 1, message_type: 0, private: false, content: conversations[id]?.text ?? '', created_at: 1 }] } };
+  });
+  on('GET', new RegExp(`${CW}/inbox_members/(\\d+)$`), (req) => {
+    const id = Number(/inbox_members\/(\d+)$/.exec(req.url)![1]);
+    return { data: { payload: id === 1 ? [{ id: 12 }] : [{ id: 99 }] } };
+  });
+  on('GET', new RegExp(`${SHOP}/admin/api/[^/]+/orders\\.json`), (req) =>
+    /name=%2311696/.test(req.url)
+      ? { data: { orders: [{ id: 5, name: '#11696', created_at: '', updated_at: '', total_price: '1', currency: 'EUR', customer: { id: 202, email: 'victim@example.com' } }] } }
+      : { data: { orders: [] } },
+  );
   on('POST', new RegExp(`${CW}/conversations/\\d+/messages$`), () => ({ data: { id: 999 } }));
   on('GET', new RegExp(`${CW}/conversations/\\d+/labels$`), () => ({ data: { payload: [] } }));
   on('POST', new RegExp(`${CW}/conversations/\\d+/labels$`), () => ({ data: {} }));
@@ -142,6 +177,8 @@ after(() => {
 beforeEach(() => {
   Object.assign(env, original);
   resetMemoryClaims();
+  resetInboxMembersCache();
+  resetGenerations();
   installFakes();
 });
 
@@ -153,7 +190,16 @@ test('API requires a per-agent session; the shared token only works in transitio
   // flag off: legacy header rejected
   assert.equal((await api('/app/api/customer', { token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' } })).status, 401);
   env.legacyDashboardTokenEnabled = true;
+  // flag on but no end date → still rejected
+  assert.equal((await api('/app/api/customer', { token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' } })).status, 401);
+  env.legacyDashboardTokenUntil = Date.now() - 1000;
+  assert.equal((await api('/app/api/customer', { token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' } })).status, 401);
+  env.legacyDashboardTokenUntil = Date.now() + 86_400_000;
   assert.equal((await api('/app/api/customer', { token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' } })).status, 200);
+  // read-only: no replies, no cancellations
+  assert.equal((await api('/app/api/draft/send', { method: 'POST', token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' }, body: JSON.stringify({ message: 'hi' }) })).status, 403);
+  assert.equal((await api('/app/api/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/cancel', { method: 'POST', token: null, conversation: 2, headers: { 'x-app-token': 'shared-legacy' }, body: JSON.stringify({ reason: 'asked' }) })).status, 403);
+  assert.equal(skioMutations().length, 0);
   // never via the query string
   assert.equal((await api('/app/api/customer?token=shared-legacy', { token: null, conversation: 2 })).status, 401);
 });
@@ -174,9 +220,31 @@ test('connect verifies the agent with Chatwoot and returns a session', async () 
 test('lookup is scoped to the conversation contact; browser-supplied email is ignored', async () => {
   const r = await api('/app/api/customer?email=anna@example.com&shopifyCustomerId=101', { conversation: 1 });
   assert.equal(r.status, 200);
-  assert.equal(r.json.link.status, 'suggested'); // AI-only link → unverified
-  assert.equal(r.json.customer.shopifyCustomerId, 202); // the contact's candidate, not "anna"
+  // planted attributes are ignored; the only candidate comes live from the message text
+  assert.equal(r.json.link.status, 'none');
+  assert.equal(r.json.link.ignoredAttributes, true);
+  assert.equal(r.json.customer.shopifyCustomerId, null);
   assert.equal(r.json.link.suggestion.email, 'victim@example.com');
+  assert.doesNotMatch(r.json.link.suggestion.basis, /Verified by support/);
+  assert.equal(r.json.link.suggestion.source.messageId, 1);
+  assert.match(r.json.link.suggestion.source.excerpt, /#11696/);
+});
+
+test('unverified widget sender with a customer’s email is only suggested', async () => {
+  const r = await api('/app/api/customer', { conversation: 3 });
+  assert.equal(r.json.link.status, 'suggested');
+  assert.equal(r.json.link.basis, 'untrusted_email');
+  const cancel = await api('/app/api/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/cancel', {
+    method: 'POST', conversation: 3, body: JSON.stringify({ reason: 'asked' }),
+  });
+  assert.equal(cancel.status, 409);
+  assert.equal(skioMutations().length, 0);
+});
+
+test('agents only see conversations of their inboxes', async () => {
+  assert.equal((await api('/app/api/customer', { conversation: 4 })).status, 403);
+  const admin = mintToken({ id: 1, name: 'Owner', email: null, role: 'administrator' }, 'access');
+  assert.equal((await api('/app/api/customer', { conversation: 4, token: admin })).status, 200);
 });
 
 test('unknown conversation → 404, missing id → 400', async () => {
@@ -197,6 +265,7 @@ test('cancel is refused while the link is only suggested (no Skio call)', async 
 test('confirm link: only pending candidates, only with a personal session; then cancel works', async () => {
   env.dashboardAppToken = 'shared-legacy';
   env.legacyDashboardTokenEnabled = true;
+  env.legacyDashboardTokenUntil = Date.now() + 86_400_000;
   const legacy = await api('/app/api/link/confirm', {
     method: 'POST', token: null, conversation: 1,
     headers: { 'x-app-token': 'shared-legacy' },
@@ -206,6 +275,11 @@ test('confirm link: only pending candidates, only with a personal session; then 
 
   const arbitrary = await api('/app/api/link/confirm', { method: 'POST', conversation: 1, body: JSON.stringify({ email: 'anna@example.com' }) });
   assert.equal(arbitrary.status, 409);
+  // a conversation whose messages don't mention the victim can't confirm the planted attribute
+  conversations[1]!.text = 'hello';
+  const planted = await api('/app/api/link/confirm', { method: 'POST', conversation: 1, body: JSON.stringify({ email: 'victim@example.com' }) });
+  assert.equal(planted.status, 409);
+  conversations[1]!.text = 'hi, where is my order #11696?';
 
   const ok = await api('/app/api/link/confirm', { method: 'POST', conversation: 1, body: JSON.stringify({ email: 'victim@example.com' }) });
   assert.equal(ok.status, 200);
@@ -248,7 +322,17 @@ test('a forged confirmation attribute set outside the tab does not verify', asyn
     ...confirmationAttributes(999, 'victim@example.com', 12), // signed for a different contact
   };
   const r = await api('/app/api/customer', { conversation: 1 });
-  assert.equal(r.json.link.status, 'suggested');
+  assert.notEqual(r.json.link.status, 'verified');
+});
+
+test('sign-out revokes the agent’s sessions', async () => {
+  const connect = await api('/app/auth/connect', { method: 'POST', token: null, body: JSON.stringify({ chatwootAccessToken: 'ruth-personal-token' }) });
+  const access = connect.json.accessToken as string;
+  assert.equal((await api('/app/api/me', { token: access })).status, 200);
+  await api('/app/auth/signout', { method: 'POST', token: access, body: JSON.stringify({ refreshToken: connect.json.refreshToken }) });
+  assert.equal((await api('/app/api/me', { token: access })).status, 401);
+  const refresh = await api('/app/auth/refresh', { method: 'POST', token: null, body: JSON.stringify({ refreshToken: connect.json.refreshToken }) });
+  assert.equal(refresh.status, 401);
 });
 
 // --- Page headers --------------------------------------------------------------------
@@ -300,4 +384,43 @@ test('signed AgentBot delivery with the dedupe store down: no bot reply, handed 
 test('sync endpoint requires the key (constant-time, fails closed)', async () => {
   assert.equal((await fetch(`${base}/sync/customers`, { method: 'POST' })).status, 401);
   assert.equal((await fetch(`${base}/sync/customers`, { method: 'POST', headers: { Authorization: 'Bearer wrong' } })).status, 403);
+});
+
+test('replayed webhook delivery ids are dropped', async () => {
+  env.chatwootAgentBotSigningSecret = 'bot-secret';
+  const send = async (messageId: number) => {
+    const body = botPayload.replace('"id":4242', `"id":${messageId}`);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = `sha256=${createHmac('sha256', 'bot-secret').update(`${ts}.${body}`).digest('hex')}`;
+    return fetch(`${base}/chatwoot/agent-bot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Chatwoot-Timestamp': ts, 'X-Chatwoot-Signature': sig, 'X-Chatwoot-Delivery': 'delivery-1' },
+      body,
+    });
+  };
+  assert.equal((await send(5001)).status, 200);
+  assert.equal((await send(5002)).status, 200);
+  await new Promise((res) => setTimeout(res, 200));
+  assert.equal(calls.filter((c) => /toggle_status$/.test(c.url)).length, 1);
+});
+
+test('a labelling failure after a successful cancel still reports success', async () => {
+  on('POST', new RegExp(`${CW}/conversations/\\d+/labels$`), () => ({ status: 500 }));
+  const ok = await api('/app/api/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/cancel', {
+    method: 'POST', conversation: 2, body: JSON.stringify({ reason: 'customer asked' }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.labelled, false);
+});
+
+test('link confirmation writes on top of a fresh read of the contact', async () => {
+  // An attribute that appears after the conversation was loaded must survive.
+  let reads = 0;
+  on('GET', new RegExp(`${CW}/contacts/501$`), () => {
+    reads++;
+    return { data: { payload: { ...contacts[501]!, custom_attributes: { ...contacts[501]!.custom_attributes, ...(reads > 1 ? { added_later: 'x' } : {}) } } } };
+  });
+  const ok = await api('/app/api/link/confirm', { method: 'POST', conversation: 1, body: JSON.stringify({ email: 'victim@example.com' }) });
+  assert.equal(ok.status, 200);
+  assert.equal(contacts[501]!.custom_attributes['added_later'], 'x');
 });

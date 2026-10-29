@@ -15,10 +15,14 @@ import {
   toUserContent,
   type CustomerImage,
 } from './attachments.js';
-import { resolveContactCustomer, type ContactResolution, type LinkSuggestion } from './contactLink.js';
-import { findLinkSuggestion } from './linkSuggestions.js';
+import {
+  contactEmailTrusted,
+  resolveContactCustomer,
+  type ContactResolution,
+  type LinkSuggestion,
+} from './contactLink.js';
+import { customerTexts, findLinkSuggestion, type CustomerText } from './linkSuggestions.js';
 import { shopifyLinkDeps } from './conversationScope.js';
-import { mergeContactAttributes } from './chatwoot.js';
 import { classifyConversation } from './classifier.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
 import {
@@ -48,6 +52,8 @@ export interface DraftLookupMeta {
   customAttributes: Record<string, unknown>;
   // Concatenated text of the customer's messages in the current conversation.
   customerMessage: string;
+  // Customer-authored texts (for live suggestions with their source message).
+  customerTexts: CustomerText[];
 }
 
 export interface GatheredDraftContext {
@@ -110,6 +116,7 @@ export async function gatherDraftContext(params: {
     resolution = await resolveContactCustomer(
       { id: contactId, email: chatwootEmail, custom_attributes: customAttributes },
       shopifyLinkDeps,
+      { trustContactEmail: contactEmailTrusted(conversationDetails) },
     );
   } catch (err) {
     logger.warn('Failed to resolve Shopify customer for contact', {
@@ -124,6 +131,7 @@ export async function gatherDraftContext(params: {
       customerEmail: null,
       contactEmail: chatwootEmail,
       suggestion: null,
+      ignoredAttributes: false,
     };
   }
   const verified = resolution.status === 'verified';
@@ -173,6 +181,7 @@ export async function gatherDraftContext(params: {
       conversationId,
       isNewConversation,
       emailSubject: mailSubject,
+      channel: conversationDetails.meta?.channel ?? null,
       identity: {
         status: resolution.status,
         hasCandidate: resolution.status === 'suggested' || resolution.suggestion !== null,
@@ -186,6 +195,7 @@ export async function gatherDraftContext(params: {
       contactId,
       customAttributes,
       customerMessage,
+      customerTexts: customerTexts(currentMessages, mailSubject),
     },
   };
 }
@@ -277,9 +287,11 @@ export async function gatherContextWithMatching(
   const dryRun = opts.dryRun ?? false;
   const { context: ctx, lookup } = await gatherDraftContext(params);
 
-  if (!lookup.matched && lookup.linkStatus !== 'suggested' && !lookup.suggestion) {
+  if (!lookup.matched && !lookup.suggestion) {
+    // Computed live from the customer's messages on every run; nothing is
+    // stored on the contact (contact attributes are customer-writable).
     const suggestion = await findLinkSuggestion(
-      lookup.customerMessage,
+      lookup.customerTexts,
       lookup.chatwootEmail,
       shopifyLinkDeps,
     ).catch(() => null);
@@ -289,18 +301,8 @@ export async function gatherContextWithMatching(
       logger.info('Possible account match found in message (pending agent confirmation)', {
         conversationId: params.conversationId,
         contactId: lookup.contactId,
+        dryRun,
       });
-      if (!dryRun) {
-        await mergeContactAttributes(lookup.contactId, lookup.customAttributes, {
-          shopify_email_link_suggested: suggestion.email,
-          shopify_email_link_suggested_basis: suggestion.basis,
-        }).catch((err) => {
-          logger.warn('Failed to store link suggestion on contact', {
-            contactId: lookup.contactId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
     }
   }
 

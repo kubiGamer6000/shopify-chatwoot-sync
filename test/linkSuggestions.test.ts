@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractCandidates, findLinkSuggestion } from '../src/services/linkSuggestions.js';
+import { extractCandidates, findLinkSuggestion, customerTexts } from '../src/services/linkSuggestions.js';
 
 test('extracts emails and order numbers in several languages', () => {
   const r = extractCandidates(
@@ -22,18 +22,28 @@ test('does not treat short numbers / prices as order numbers', () => {
 });
 
 test('an order number resolves to a suggestion only (no writes)', async () => {
-  const s = await findLinkSuggestion('where is my order #11696', 'stranger@evil.test', {
+  const texts = customerTexts(
+    [
+      { id: 7, message_type: 1, private: false, content: 'agent text #99999', created_at: 1 },
+      { id: 8, message_type: 0, private: false, content: 'hello, where is my order #11696 please', created_at: 2 },
+    ],
+    null,
+  );
+  const s = await findLinkSuggestion(texts, 'stranger@evil.test', {
     searchCustomerByEmail: async () => null,
     searchOrderByName: async (n) =>
       n === '11696'
         ? { id: 1, name: '#11696', created_at: '', updated_at: '', total_price: '1', currency: 'EUR', customer: { id: 9, email: 'Victim@Example.com' } }
         : null,
   });
-  assert.deepEqual(s, { email: 'victim@example.com', basis: 'Order #11696 mentioned in the customer’s message' });
+  assert.equal(s?.email, 'victim@example.com');
+  assert.match(s!.basis, /order number the customer wrote/);
+  assert.equal(s?.source?.messageId, 8);
+  assert.match(s?.source?.excerpt ?? '', /#11696/);
 });
 
 test('an email in the message only counts on an exact Shopify match', async () => {
-  const s = await findLinkSuggestion('my email is old@example.com', null, {
+  const s = await findLinkSuggestion([{ kind: 'message', content: 'my email is old@example.com' }], null, {
     searchCustomerByEmail: async () => ({ id: 1, email: 'older@example.com' }),
     searchOrderByName: async () => null,
   });

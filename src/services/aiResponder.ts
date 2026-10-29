@@ -356,10 +356,20 @@ interface ResponderToolHandlers {
  * two can never drift; only the handlers differ. `cancel_subscription` is only
  * exposed when the conversation is a sub-cancel.
  */
+/**
+ * The bot may cancel only for a verified account holder, and never in an
+ * email conversation: the From address can be forged, so there it sends the
+ * self-service cancellation link instead (the reply goes to the address on
+ * file, i.e. the real owner).
+ */
+export function botMayCancel(ctx: Pick<PromptContext, 'identity' | 'channel'>): boolean {
+  return ctx.identity?.status === 'verified' && ctx.channel !== 'Channel::Email';
+}
+
 export function buildResponderTools(
   labels: ClassificationLabel[],
   handlers: ResponderToolHandlers,
-  opts: { identityVerified: boolean },
+  opts: { canCancel: boolean },
 ) {
   const sendReplyTool = betaZodTool({
     name: 'send_reply',
@@ -398,8 +408,9 @@ export function buildResponderTools(
   });
 
   // Account actions are only possible when the contact's link to the Shopify
-  // customer is verified (own email match, or agent-confirmed).
-  return labels.includes('sub-cancel') && opts.identityVerified
+  // customer is verified (own email match, or agent-confirmed), and never on
+  // email inboxes (see botMayCancel).
+  return labels.includes('sub-cancel') && opts.canCancel
     ? [sendReplyTool, escalateTool, cancelTool]
     : [sendReplyTool, escalateTool];
 }
@@ -502,7 +513,7 @@ async function runResponderAgent(
     cancelSubscription: async () => {
       // Defence in depth: the tool is only offered for verified links, but
       // re-check here so no code path can cancel for an unverified sender.
-      if (ctx.identity?.status !== 'verified' || !ctx.customerEmail) {
+      if (!botMayCancel(ctx) || !ctx.customerEmail) {
         void audit({
           action: 'subscription.cancel',
           actor: 'agent-bot',
@@ -511,9 +522,11 @@ async function runResponderAgent(
           contactId,
           linkStatus: ctx.identity?.status ?? null,
           outcome: 'denied',
-          reason: 'identity not verified',
+          reason: ctx.channel === 'Channel::Email' ? 'email channel' : 'identity not verified',
         });
-        return 'You cannot cancel: the sender is not verified as the account holder. Escalate to a human.';
+        return ctx.channel === 'Channel::Email'
+          ? 'You cannot cancel in an email conversation. Use send_reply to send the self-service cancellation link instead.'
+          : 'You cannot cancel: the sender is not verified as the account holder. Escalate to a human.';
       }
       const lookupEmail = ctx.customerEmail;
       const reason = `Customer asked to cancel in Chatwoot conversation #${conversationId} (handled by the AgentBot)`;
@@ -553,11 +566,11 @@ async function runResponderAgent(
         return 'The cancellation could not be completed due to an internal error. Do not claim success — escalate to a human.';
       }
     },
-  }, { identityVerified: ctx.identity?.status === 'verified' });
+  }, { canCancel: botMayCancel(ctx) });
 
   let freeText: string;
   try {
-    const run = await runResponderLoop(cfg, tools, toUserContent(buildPrompt(ctx), images));
+    const run = await runResponderLoop(cfg, tools, toUserContent(buildPrompt({ ...ctx, forAgentBot: true }), images));
     freeText = finalText(run.finalMessage);
     void recordAiUsage({
       kind: 'responder',
@@ -680,7 +693,7 @@ export async function runResponderReplay(params: {
   language?: string | null;
 }): Promise<ResponderReplayResult> {
   const { ctx, labels, cfg, images = [], language = null } = params;
-  const userPrompt = buildPrompt(ctx);
+  const userPrompt = buildPrompt({ ...ctx, forAgentBot: true });
   const toolInvocations: { name: string; input: unknown }[] = [];
   const state: { reply: string | null } = { reply: null };
 
@@ -698,7 +711,7 @@ export async function runResponderReplay(params: {
       toolInvocations.push({ name: 'cancel_subscription', input: {} });
       return 'Subscription cancelled (REPLAY: no actions performed). Confirm the cancellation to the customer.';
     },
-  }, { identityVerified: ctx.identity?.status === 'verified' });
+  }, { canCancel: botMayCancel(ctx) });
 
   const { finalMessage, inputTokens, outputTokens } = await runResponderLoop(
     cfg,

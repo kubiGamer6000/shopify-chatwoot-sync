@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { verifyChatwootWebhook } from '../middleware/chatwootWebhookAuth.js';
 import { logger } from '../utils/logger.js';
 import { postAiDraft } from '../services/aiDraft.js';
-import { claimOnce } from '../services/cache.js';
+import { claim, claimOnce } from '../services/cache.js';
 import { autoReplySignalFromAttributes, systemPhraseSignal } from '../services/autoReply.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
@@ -16,6 +16,7 @@ router.post('/', verifyChatwootWebhook('account'), (req: Request, res: Response)
   res.status(200).json({ received: true });
 
   const payload = req.body as ChatwootWebhookPayload;
+  const deliveryId = req.header('x-chatwoot-delivery') ?? null;
 
   if (payload.event !== 'message_created') return;
   if (payload.message_type !== 'incoming') return;
@@ -41,6 +42,12 @@ router.post('/', verifyChatwootWebhook('account'), (req: Request, res: Response)
   });
 
   void (async () => {
+    // Replays of a signed delivery (same X-Chatwoot-Delivery id) are dropped.
+    if (deliveryId && (await claim('wh-delivery', deliveryId, MESSAGE_DEDUPE_TTL_MS)) === 'duplicate') {
+      logger.info('Duplicate webhook delivery id, skipping', { conversationId: payload.conversation.id });
+      return;
+    }
+
     // Skip duplicate deliveries of the same message so we never post two drafts
     // for one customer message. Drafts are private notes (never sent to the
     // customer), so when Firestore is down this proceeds on the in-process

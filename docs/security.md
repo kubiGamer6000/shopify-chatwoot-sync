@@ -8,29 +8,35 @@ and how. It was introduced by the `fix/security-hardening` change (Oct 2026).
 
 One function decides it: [`src/services/contactLink.ts`](../src/services/contactLink.ts).
 
+**Contact custom attributes are customer-writable.** Chatwoot's public widget
+API (`PATCH /api/v1/widget/contact`) lets a website visitor set their own
+contact's `custom_attributes`, even with identity validation enforced. So no
+unsigned attribute (`shopify_email_link`, `shopify_customer_id`, anything
+"suggested") is trusted, displayed as a reason, or confirmable.
+
 | Status | When | What it allows |
 |---|---|---|
-| `verified` | The Shopify customer's email **is** the contact's own email (exact, case-insensitive), **or** an agent confirmed the link in the Customer 360 tab | Everything: AI drafts and the AgentBot see the orders; agents and the bot can cancel |
-| `suggested` | A `shopify_email_link` without a valid agent confirmation (e.g. set by the old AI matcher, by hand, or via the widget SDK); a `shopify_customer_id` whose email differs from the sender; an email / order number found in the customer's message | Agents see the candidate in the tab with **Unverified** + **Confirm link**. The AI sees no account data. No cancellations |
-| `none` | Nothing found | — |
+| `verified` | (a) an agent confirmed the link in the tab (HMAC with `LINK_CONFIRMATION_SECRET`), or (b) the Shopify customer's email is exactly the contact's email **and** the email is trustworthy for this conversation: an **email inbox**, or a **web widget whose contact is HMAC-verified** (`hmac_verified`) | AI drafts and the AgentBot see orders. Agents can cancel. The bot can cancel **except on email inboxes** |
+| `suggested` | Server-derived candidates only: the contact's own email on a channel where it proves nothing (unverified widget, API, social…); a link the old AI matcher made **before** this change (signed by `npm run snapshot:legacy-links`); an email / order number found **live** in the customer's messages in this conversation | Agents see it with **Unverified**, the quoted message, and a warning, plus **Confirm link**. The AI sees no account data. No cancellations |
+| `none` | Nothing found. Unsigned link attributes or a mismatching `shopify_customer_id` are ignored (the tab says so) | — |
 
-- Nothing is ever linked automatically from message text. The old Claude
-  matcher (`customerResolver.ts`) is removed; a deterministic extractor
-  ([`linkSuggestions.ts`](../src/services/linkSuggestions.ts)) stores a
-  **pending suggestion** on the contact (`shopify_email_link_suggested`,
-  `shopify_email_link_suggested_basis`).
+- Nothing is ever linked automatically from message text, and suggestions are
+  no longer stored on the contact. They are computed from the conversation's
+  incoming messages on each request. The reason text comes from fixed server
+  templates, and the tab quotes the message that contained the email or order
+  number.
 - Shopify's customer search is fuzzy, so every email match is re-checked for
   exact equality.
 - **Agent confirmation** writes `shopify_email_link`,
   `shopify_email_link_confirmed_by` (Chatwoot agent id),
   `shopify_email_link_confirmed_at` and `shopify_email_link_sig`, an HMAC over
-  account, contact id, email, agent and time with a server-only key. Editing
-  these attributes anywhere else (Chatwoot UI, API, widget) does not produce a
-  valid signature, so the link stays unverified.
-- Existing AI-made links are therefore unverified automatically (no migration),
-  and show as "suggested" until an agent confirms them.
-- Only the pending candidates can be confirmed (the endpoint can't attach an
-  arbitrary customer to a contact), and only with a personal session.
+  the account, contact id, email, agent and time. Only server-derived
+  candidates can be confirmed, only with a personal session, and the write is
+  based on a fresh read of the contact.
+- **Old AI links:** run `npm run snapshot:legacy-links` (dry run) and then
+  `-- --apply` once **before** deploying, with the production environment. It
+  signs the links that exist at that moment (`shopify_email_link_legacy_sig`),
+  which makes them confirmable suggestions. Links set later are ignored.
 
 ## 2. AgentBot and AI drafts
 
@@ -38,7 +44,9 @@ One function decides it: [`src/services/contactLink.ts`](../src/services/contact
   prompt contains an *IDENTITY NOT VERIFIED* block forbidding any disclosure or
   account action.
 - `cancel_subscription` is offered to the bot only for a verified account
-  holder, and the handler re-checks. It cancels with Skio's customer notice
+  holder and **never in an email conversation**: a From address can be
+  forged, so there the bot sends the self-service cancellation link, and the
+  reply goes to the address on file. The handler re-checks both conditions. It cancels with Skio's customer notice
   (`shouldSendNotif: true`), records the reason in the audit log and posts a
   private note. (Skio's `CancelSubscriptionInput` has no reason field; checked
   by schema introspection.)
@@ -58,17 +66,30 @@ No secret in the URL any more. The Chatwoot Dashboard App URL is just
    accepts the agent only if they are a member of `CHATWOOT_ACCOUNT_ID`. The
    token is used for that one call; it is not stored or logged.
 3. The server returns an HMAC-signed access token (12 h) and refresh token
-   (30 days), kept in the iframe's `localStorage` and sent as
-   `Authorization: Bearer`. Refresh re-checks with the account API token that
-   the agent still exists in the account. Rotating `APP_SESSION_SECRET` signs
-   everyone out.
-4. Chatwoot's `appContext.currentAgent` (unsigned) is only compared with the
-   session to warn about a mismatch; it is never used for authorization.
-5. **Transition:** with `LEGACY_DASHBOARD_TOKEN_ENABLED=true`, the old
-   `/app?token=<DASHBOARD_APP_TOKEN>` URL still works. The SPA removes the token
-   from the address bar, sends it only in the `x-app-token` header, and the
-   server compares it in constant time. Such requests are audited as
-   `legacy-shared-token`; confirming links is not allowed with it. Default off.
+   (signed with `APP_SESSION_SECRET`), kept in the iframe's `localStorage` and
+   sent as `Authorization: Bearer`.
+   - Every refresh re-checks with the account API that the agent still exists.
+   - **Absolute cap:** nothing outlives 30 days from the original connect.
+   - **Sign out** bumps the agent's session generation (Firestore
+     `agentSessions`), which revokes all of that agent's tokens.
+   - Rotating `APP_SESSION_SECRET` signs everyone out.
+   - The stored session is dropped only on a 401, not on 429/503.
+4. **Per-inbox authorization:** an agent can only open conversations of
+   inboxes they are a member of (`GET /inbox_members/:inbox_id`, cached 5 min).
+   Chatwoot administrators can open all inboxes. It fails closed if membership
+   can't be read, so the `CHATWOOT_API_TOKEN` user must be able to read inbox
+   members (an administrator).
+5. Chatwoot's `appContext.currentAgent` (unsigned) is compared with the
+   session. If they differ, the stored session is dropped and the person has to
+   connect as themselves. It is never used for authorization.
+6. **Transition:** the old `/app?token=<DASHBOARD_APP_TOKEN>` URL works only
+   while `LEGACY_DASHBOARD_TOKEN_ENABLED=true` **and** the current time is
+   before `LEGACY_DASHBOARD_TOKEN_UNTIL` (ISO date, required).
+   - It is **read-only**: no replies, no cancellations, no link confirmations.
+   - The SPA removes the token from the address bar and sends it only in the
+     `x-app-token` header; the server compares it in constant time.
+   - Requests are audited as `legacy-shared-token`, with a rate-limit bucket
+     per IP and claimed agent.
 
 ## 4. Server-side scope
 
@@ -85,7 +106,9 @@ reason, and defaults to sending Skio's cancellation email.
 `/chatwoot` (account webhook) and `/chatwoot/agent-bot`:
 
 - Preferred: Chatwoot's HMAC signature (`X-Chatwoot-Timestamp`,
-  `X-Chatwoot-Signature: sha256=HMAC(secret, "<ts>.<raw body>")`, ±5 min),
+  `X-Chatwoot-Signature: sha256=HMAC(secret, "<ts>.<raw body>")`; accepted
+  up to 5 min old and at most 60 s in the future). Replayed
+  `X-Chatwoot-Delivery` ids are dropped,
   with `CHATWOOT_WEBHOOK_SIGNING_SECRET` / `CHATWOOT_AGENT_BOT_SIGNING_SECRET`.
 - Transition: `LEGACY_WEBHOOK_QUERY_SECRET_ENABLED=true` accepts the old
   `?secret=` (constant-time) when no signing secret is set.
@@ -128,7 +151,7 @@ confirmations also leave a private note in the conversation.
 - postMessage: only messages from the parent frame **and** the Chatwoot origin
   are accepted; requests go to that origin, never `'*'`.
 - Errors: generic messages; body-parser errors return 400/413 instead of 500.
-- Rate limits: connect 20 / 15 min per IP; per agent 1500 reads and 400 writes / hour.
+- Rate limits: connect 20 / 15 min per IP; per agent (own bucket) 1500 reads and 400 writes / hour.
 - Admin console: only a **verified** Google email can match `ADMIN_BOOTSTRAP_EMAILS`.
 - Dependencies: removed unused `firebase` (client) and `xlsx` from the server;
   `npm audit fix` applied to the server, `web/` and `admin-web/`.
@@ -137,13 +160,17 @@ confirmations also leave a private note in the conversation.
 
 | Variable | Purpose |
 |---|---|
-| `APP_SESSION_SECRET` | Signs agent sessions and link confirmations. If unset, a key is derived from `CHATWOOT_API_TOKEN` (works, but set a dedicated 32+ byte random value) |
+| `APP_SESSION_SECRET` | **Required** (≥ 32 chars). Signs agent sessions |
+| `LINK_CONFIRMATION_SECRET` | **Required** (≥ 32 chars, different from the above). Signs agent link confirmations and the legacy-link snapshot |
 | `LEGACY_DASHBOARD_TOKEN_ENABLED` | `true` only during the switch to the new tab URL. Default `false` |
+| `LEGACY_DASHBOARD_TOKEN_UNTIL` | Hard end date for the legacy token (ISO, e.g. `2026-11-06T00:00:00Z`); required for the legacy token to work |
 | `CHATWOOT_WEBHOOK_SIGNING_SECRET` | Secret of the account webhook in Chatwoot |
 | `CHATWOOT_AGENT_BOT_SIGNING_SECRET` | Secret of the Agent Bot in Chatwoot |
 | `LEGACY_WEBHOOK_QUERY_SECRET_ENABLED` | `true` only until the signing secrets are set. Default `false` |
 | `ALERT_WEBHOOK_URL` | Optional Slack-compatible incoming webhook for alerts |
 
-Changing `APP_SESSION_SECRET` (or `CHATWOOT_API_TOKEN` while it is unset)
-invalidates all sessions **and** all agent link confirmations (they become
-"suggested" again).
+The server refuses to start (unless `NODE_ENV=development`/`test`) when
+either secret is missing, shorter than 32 characters, or the two are equal.
+There is no fallback derivation. Changing `APP_SESSION_SECRET` signs everyone
+out; changing `LINK_CONFIRMATION_SECRET` voids all agent confirmations and the
+legacy snapshot (those links go back to unverified).

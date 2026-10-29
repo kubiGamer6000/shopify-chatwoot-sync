@@ -26,6 +26,10 @@ export interface PromptContext {
   // How sure we are that this contact IS the Shopify customer. Unless
   // `verified`, the orders/customer above are empty and the AI must not reveal
   // or act on any account details (security fix P1).
+  // Chatwoot channel type of the conversation (e.g. 'Channel::Email').
+  channel?: string | null;
+  // Set when the prompt is for the autonomous AgentBot (not an agent draft).
+  forAgentBot?: boolean;
   identity?: {
     status: 'verified' | 'suggested' | 'none';
     /** A possible account match is waiting for an agent to confirm it. */
@@ -73,6 +77,17 @@ export function buildPrompt(ctx: PromptContext): string {
         ctx.identity.hasCandidate
           ? 'A possible account match was found from details in their message; a human agent must confirm it in the Customer 360 tab before account details can be used.'
           : 'If the request needs account data, ask for the order number and the email used at checkout.',
+      ].join('\n'),
+    );
+  }
+
+  if (ctx.forAgentBot && ctx.channel === 'Channel::Email') {
+    sections.push(
+      [
+        '--- ACCOUNT ACTIONS (EMAIL) ---',
+        'This conversation is by email. Email sender addresses can be forged, so you cannot cancel or change a subscription here.',
+        'If the customer wants to cancel, reply with the self-service cancellation link (your reply goes to the email address on file).',
+        'Never say a subscription has been cancelled.',
       ].join('\n'),
     );
   }

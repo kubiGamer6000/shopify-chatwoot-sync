@@ -15,12 +15,13 @@ export function constantTimeEqual(a: string | undefined | null, b: string | unde
 }
 
 /**
- * Returns a purpose-bound signing key. Uses APP_SESSION_SECRET when set,
- * otherwise derives one from the (server-only) Chatwoot API token, so the app
- * keeps working before the owner sets a dedicated secret.
+ * Purpose-bound signing keys. Sessions and link confirmations use SEPARATE
+ * root secrets (APP_SESSION_SECRET / LINK_CONFIRMATION_SECRET), checked at
+ * startup by assertSecuritySecrets(); there is no fallback derivation.
  */
 export function signingKey(purpose: string): Buffer {
-  const root = env.appSessionSecret || `derived:${env.chatwootApiToken}`;
+  const root = purpose.startsWith('session') ? env.appSessionSecret : env.linkConfirmationSecret;
+  if (!root) throw new Error('Signing secret not configured');
   return createHmac('sha256', root).update(`scandi-c360:${purpose}`).digest();
 }
 

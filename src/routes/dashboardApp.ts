@@ -19,7 +19,7 @@ import {
   addConversationLabels,
   postPrivateNote,
 } from '../services/chatwootConversation.js';
-import { mergeContactAttributes } from '../services/chatwoot.js';
+import { mergeContactAttributes, getContact } from '../services/chatwoot.js';
 import {
   ScopeError,
   loadConversationScope,
@@ -30,11 +30,13 @@ import {
 import {
   confirmableEmails,
   confirmationAttributes,
+  contactEmailTrusted,
   findCustomerByExactEmail,
   resolveContactCustomer,
   type ContactResolution,
+  type LinkSuggestion,
 } from '../services/contactLink.js';
-import { findLinkSuggestion } from '../services/linkSuggestions.js';
+import { customerTexts, findLinkSuggestion } from '../services/linkSuggestions.js';
 import { audit, type AuditEntry } from '../services/audit.js';
 import { normalizeEmail } from '../security/crypto.js';
 import { RateLimiter } from '../utils/rateLimit.js';
@@ -67,7 +69,13 @@ const router = Router();
 router.use((req: Request, res: Response, next) => {
   res.setHeader('Cache-Control', 'no-store');
   const limiter = req.method === 'GET' ? readLimiter : writeLimiter;
-  if (!limiter.take(`${req.agent?.actor}:${req.method}`)) {
+  // One bucket per agent; legacy-token callers get a bucket per IP + claimed agent.
+  const a = req.agent;
+  const bucket =
+    a?.via === 'session'
+      ? `agent:${a.id}`
+      : `legacy:${req.header('do-connecting-ip') ?? req.ip}:${a?.id ?? 0}`;
+  if (!limiter.take(bucket)) {
     res.status(429).json({ error: 'Too many requests, slow down.' });
     return;
   }
@@ -107,7 +115,7 @@ async function scopeOr(
     return null;
   }
   try {
-    return await loadConversationScope(conversationId);
+    return await loadConversationScope(conversationId, req.agent);
   } catch (err) {
     const status = err instanceof ScopeError ? err.status : 502;
     const message = err instanceof ScopeError ? err.message : 'Could not load the conversation';
@@ -124,7 +132,34 @@ async function scopeOr(
 }
 
 async function resolveScope(scope: ConversationScope, loadOrders = true): Promise<ContactResolution> {
-  return resolveContactCustomer(scope.contact, shopifyLinkDeps, { loadOrders });
+  return resolveContactCustomer(scope.contact, shopifyLinkDeps, {
+    loadOrders,
+    trustContactEmail: contactEmailTrusted(scope.conversation),
+  });
+}
+
+/** Suggestion computed live from this conversation's customer messages. */
+async function liveSuggestion(
+  scope: ConversationScope,
+  contactEmail: string | null,
+): Promise<LinkSuggestion | null> {
+  const messages = await getConversationMessages(scope.conversationId).catch(() => null);
+  return findLinkSuggestion(
+    customerTexts(messages?.payload ?? [], scope.conversation.additional_attributes?.['mail_subject']),
+    contactEmail,
+    shopifyLinkDeps,
+  ).catch(() => null);
+}
+
+/** Legacy shared-token callers are read-only. */
+function denyLegacy(req: Request, res: Response, scope: ConversationScope, action: string): boolean {
+  if (req.agent?.via === 'session') return false;
+  void audit({ ...auditBase(req, scope), action, outcome: 'denied', reason: 'legacy token is read-only' });
+  res.status(403).json({
+    error: 'Connect Customer 360 with your own Chatwoot access token to do this.',
+    code: 'personal_session_required',
+  });
+  return true;
 }
 
 function agentLabel(req: Request): string {
@@ -152,21 +187,11 @@ router.get('/customer', async (req: Request, res: Response) => {
   try {
     const resolution = await resolveScope(scope);
 
-    // No verified orders and nothing pending: look for an email / order number
-    // in the customer's messages and offer it as a suggestion (never linked).
+    // No verified orders and no server-derived candidate: look for an email /
+    // order number in the customer's messages, live (never from attributes).
     if (!resolution.suggestion && resolution.orders.length === 0) {
-      const messages = await getConversationMessages(scope.conversationId).catch(() => null);
-      const text = (messages?.payload ?? [])
-        .filter((m) => m.message_type === 0 && !m.private)
-        .map((m) => m.content ?? '')
-        .join('\n');
-      const subject = scope.conversation.additional_attributes?.['mail_subject'];
-      const suggestion = await findLinkSuggestion(
-        `${typeof subject === 'string' ? subject : ''}\n${text}`,
-        resolution.contactEmail,
-        shopifyLinkDeps,
-      ).catch(() => null);
-      if (suggestion) resolution.suggestion = suggestion;
+      const live = await liveSuggestion(scope, resolution.contactEmail);
+      if (live) resolution.suggestion = live;
     }
 
     const [profile, aiSummary] = await Promise.all([
@@ -211,54 +236,38 @@ router.post('/link/confirm', async (req: Request, res: Response) => {
     fail(res, 400, 'email is required');
     return;
   }
-  if (req.agent?.via !== 'session') {
-    void audit({
-      ...auditBase(req, scope),
-      action: 'link.confirm',
-      outcome: 'denied',
-      reason: 'legacy token',
-    });
-    fail(res, 403, 'Connect with your own Chatwoot access token to confirm links.');
-    return;
-  }
+  if (denyLegacy(req, res, scope, 'link.confirm')) return;
   try {
     const resolution = await resolveScope(scope, false);
-    // Only the suggested / pending candidates can be confirmed, so this
-    // endpoint can't be used to attach an arbitrary customer to a contact.
-    const allowed = confirmableEmails(scope.contact, resolution);
-    if (!allowed.has(email)) {
-      // The tab may have computed a live suggestion from the messages: recheck.
-      const messages = await getConversationMessages(scope.conversationId).catch(() => null);
-      const text = (messages?.payload ?? [])
-        .filter((m) => m.message_type === 0 && !m.private)
-        .map((m) => m.content ?? '')
-        .join('\n');
-      const subject = scope.conversation.additional_attributes?.['mail_subject'];
-      const live = await findLinkSuggestion(
-        `${typeof subject === 'string' ? subject : ''}\n${text}`,
-        resolution.contactEmail,
-        shopifyLinkDeps,
-      ).catch(() => null);
-      if (live?.email !== email) {
-        void audit({
-          ...auditBase(req, scope),
-          action: 'link.confirm',
-          outcome: 'denied',
-          reason: 'not a pending suggestion',
-        });
-        fail(res, 409, 'That email is not a pending suggestion for this contact.');
-        return;
-      }
+    // Only SERVER-DERIVED candidates can be confirmed (the resolution's own
+    // suggestion, or one computed live from the messages). Contact attributes
+    // are customer-writable, so they never qualify by themselves.
+    const live = resolution.suggestion ? null : await liveSuggestion(scope, resolution.contactEmail);
+    if (!confirmableEmails(resolution, live).has(email)) {
+      void audit({
+        ...auditBase(req, scope),
+        action: 'link.confirm',
+        outcome: 'denied',
+        reason: 'not a server-derived suggestion',
+      });
+      fail(res, 409, 'That email is not a suggestion for this conversation.');
+      return;
     }
     const customer = await findCustomerByExactEmail(shopifyLinkDeps, email);
     if (!customer) {
       fail(res, 404, 'No Shopify customer has that email.');
       return;
     }
+    // Fresh read right before writing, so no stale attributes are written back.
+    const fresh = await getContact(scope.contact.id);
+    if (!fresh) {
+      fail(res, 404, 'Contact not found');
+      return;
+    }
     await mergeContactAttributes(
       scope.contact.id,
-      (scope.contact.custom_attributes as Record<string, unknown> | undefined) ?? {},
-      confirmationAttributes(scope.contact.id, email, req.agent.id),
+      (fresh.custom_attributes as Record<string, unknown> | undefined) ?? {},
+      confirmationAttributes(scope.contact.id, email, req.agent!.id),
     );
     void audit({
       ...auditBase(req, scope),
@@ -395,6 +404,7 @@ router.post('/draft/generate', async (req: Request, res: Response) => {
 router.post('/draft/send', async (req: Request, res: Response) => {
   const scope = await scopeOr(req, res, 'reply.send');
   if (!scope) return;
+  if (denyLegacy(req, res, scope, 'reply.send')) return;
   const body = (req.body ?? {}) as { message?: unknown; resolve?: unknown };
   const message = typeof body.message === 'string' ? body.message.trim() : '';
   const shouldResolve = body.resolve !== false;
@@ -458,6 +468,7 @@ router.post('/subscriptions/:id/cancel', async (req: Request, res: Response) => 
   }
   const scope = await scopeOr(req, res, 'subscription.cancel');
   if (!scope) return;
+  if (denyLegacy(req, res, scope, 'subscription.cancel')) return;
 
   const body = (req.body ?? {}) as { reason?: unknown; notifyCustomer?: unknown };
   const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 500) : '';
@@ -535,9 +546,16 @@ router.post('/subscriptions/:id/cancel', async (req: Request, res: Response) => 
       `[Customer 360] Skio subscription cancelled by ${agentLabel(req)}.\nReason: ${reason}\nCustomer notified by Skio: ${notifyCustomer ? 'yes' : 'no'}`,
     ).catch(() => undefined);
 
-    // Best-effort: tag the ticket so agents can filter cancellations.
-    const merged = await addConversationLabels(scope.conversationId, [SUB_CANCELLED_LABEL]);
-    res.json({ ok: true, labelled: merged.includes(SUB_CANCELLED_LABEL) });
+    // Best-effort: tag the ticket so agents can filter cancellations. The
+    // cancellation already happened, so a labelling failure never fails it.
+    let labelled = false;
+    try {
+      const merged = await addConversationLabels(scope.conversationId, [SUB_CANCELLED_LABEL]);
+      labelled = merged.includes(SUB_CANCELLED_LABEL);
+    } catch {
+      labelled = false;
+    }
+    res.json({ ok: true, labelled });
   } catch (err) {
     logger.error('Failed to cancel subscription', {
       subscriptionId,

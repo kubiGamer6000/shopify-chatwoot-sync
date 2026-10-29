@@ -13,7 +13,8 @@
     "backfill": "tsx src/scripts/backfillOpenConversations.ts",
     "review:agentbot": "tsx src/scripts/reviewAgentBot.ts",
     "test": "node --import tsx --import ./test/setup.ts --test --test-reporter=spec 'test/**/*.test.ts'",
-    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test/tsconfig.json"
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test/tsconfig.json",
+    "snapshot:legacy-links": "tsx src/scripts/snapshotLegacyLinks.ts"
   },
   "engines": {
     "node": "22.x"

@@ -38,6 +38,10 @@ test('rejects a bad signature, a stale timestamp and a missing header', () => {
   const old = String(now - 3600);
   assert.equal(checkChatwootWebhook('agentBot', req({ 'x-chatwoot-timestamp': old, 'x-chatwoot-signature': sign('s3cret', old) }, body), now).ok, false);
   assert.equal(checkChatwootWebhook('agentBot', req({}, body), now).ok, false);
+  const future = String(now + 120);
+  assert.equal(checkChatwootWebhook('agentBot', req({ 'x-chatwoot-timestamp': future, 'x-chatwoot-signature': sign('s3cret', future) }, body), now).ok, false);
+  const slight = String(now + 30);
+  assert.equal(checkChatwootWebhook('agentBot', req({ 'x-chatwoot-timestamp': slight, 'x-chatwoot-signature': sign('s3cret', slight) }, body), now).ok, true);
 });
 
 test('the query secret works only with the legacy flag and no signing secret', () => {

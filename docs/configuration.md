@@ -29,7 +29,9 @@ Validated/typed in [`src/config/env.ts`](../src/config/env.ts).
 | `LEGACY_WEBHOOK_QUERY_SECRET_ENABLED` | No | Transition only: accept `?secret=` (`CHATWOOT_WEBHOOK_SECRET` / `CHATWOOT_AGENT_BOT_SECRET`) when no signing secret is set. Default `false` |
 | `CHATWOOT_WEBHOOK_SECRET` | No | Legacy `?secret=` value for the draft webhook |
 | `CHATWOOT_AGENT_BOT_SECRET` | No | Legacy `?secret=` value for the AgentBot webhook |
-| `APP_SESSION_SECRET` | Recommended | Signs Customer 360 sessions and agent link confirmations ([security.md](security.md)) |
+| `APP_SESSION_SECRET` | Yes | Signs Customer 360 sessions (≥32 chars) ([security.md](security.md)) |
+| `LINK_CONFIRMATION_SECRET` | Yes | Signs agent link confirmations; must differ from `APP_SESSION_SECRET` |
+| `LEGACY_DASHBOARD_TOKEN_UNTIL` | No | Hard end date (ISO) for the legacy shared tab token |
 | `ALERT_WEBHOOK_URL` | No | Slack-compatible webhook for operational alerts |
 | `AGENT_BOT_HOLDING_REPLY` | No | `true`/`false` (default `true`). When `false`, escalations send no holding reply |
 | `DASHBOARD_APP_TOKEN` | No | Legacy shared tab token; accepted only when `LEGACY_DASHBOARD_TOKEN_ENABLED=true` (transition) |

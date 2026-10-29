@@ -3,19 +3,29 @@
  *
  * This is the single place that decides whether a contact is linked to a
  * Shopify customer, used by the Customer 360 tab, the AI drafts and the
- * AgentBot. The rules (security fix P1):
+ * AgentBot.
  *
- * - `verified`  — the Shopify customer's email is exactly the contact's own
- *                 email, OR an agent confirmed the link in the Customer 360 tab
- *                 (HMAC-signed confirmation stored on the contact).
- * - `suggested` — anything else that points at a customer: a
- *                 `shopify_email_link` set by the old AI matcher (or edited by
- *                 hand / via the widget SDK), a `shopify_customer_id` whose
- *                 email differs from the contact's, or an email / order number
- *                 found in the customer's message. Shown to agents with a
- *                 one-click "confirm link"; NEVER used by automation to reveal
- *                 order details or take actions.
- * - `none`      — nothing found.
+ * IMPORTANT: contact custom attributes are NOT trusted input. Chatwoot lets a
+ * website-widget visitor update their own contact (including
+ * custom_attributes) through the public widget API, even with identity
+ * validation enforced. So no unsigned attribute can make a link verified or
+ * even confirmable. Only these count:
+ *
+ * - `verified`  — (a) an agent confirmed the link in the Customer 360 tab
+ *                 (HMAC signature with LINK_CONFIRMATION_SECRET), or (b) the
+ *                 Shopify customer's email is exactly the contact's email AND
+ *                 the contact's email is trustworthy for this conversation
+ *                 (email channel, or web widget with an HMAC-verified
+ *                 identity).
+ * - `suggested` — a candidate the server derived itself: the contact's own
+ *                 email on a channel where it isn't trustworthy, a link the old
+ *                 AI matcher made BEFORE this change (signed snapshot, see
+ *                 scripts/snapshotLegacyLinks.ts), or an email / order number
+ *                 found live in the customer's messages (linkSuggestions.ts).
+ *                 Agents confirm with one click after checking identity.
+ * - `none`      — nothing found. Unsigned `shopify_email_link` /
+ *                 mismatching `shopify_customer_id` values are ignored and
+ *                 reported as `ignoredAttributes` so the tab can warn.
  */
 import { env } from '../config/env.js';
 import { hmacHex, normalizeEmail, signingKey, constantTimeEqual } from '../security/crypto.js';
@@ -26,8 +36,8 @@ export type LinkStatus = 'verified' | 'suggested' | 'none';
 export type LinkBasis =
   | 'email_match'
   | 'agent_confirmed'
-  | 'unverified_link'
-  | 'shopify_id_mismatch'
+  | 'untrusted_email'
+  | 'legacy_link'
   | 'message_suggestion'
   | null;
 
@@ -38,10 +48,19 @@ export interface ContactLike {
   custom_attributes?: Record<string, unknown> | null;
 }
 
+export interface SuggestionSource {
+  kind: 'message' | 'subject' | 'contact_email' | 'legacy_link';
+  messageId?: number | null;
+  createdAt?: string | null;
+  /** Short quote of the customer text containing the email / order number. */
+  excerpt?: string | null;
+}
+
 export interface LinkSuggestion {
   email: string;
-  /** Human-readable reason shown to the agent (no PII beyond order numbers). */
+  /** Server-generated, fixed-template reason (never attribute text). */
   basis: string;
+  source?: SuggestionSource;
 }
 
 export interface ContactResolution {
@@ -54,8 +73,10 @@ export interface ContactResolution {
   customerEmail: string | null;
   /** The contact's own email (normalised). */
   contactEmail: string | null;
-  /** Candidate the agent can confirm (also set alongside a verified customer with no orders). */
+  /** Server-derived candidate the agent can confirm. */
   suggestion: LinkSuggestion | null;
+  /** Link-like attributes were present but ignored (unsigned / mismatching). */
+  ignoredAttributes: boolean;
 }
 
 export interface LinkDeps {
@@ -64,7 +85,26 @@ export interface LinkDeps {
   fetchCustomerOrders: (id: number) => Promise<ShopifyOrder[]>;
 }
 
-// --- Agent confirmation signatures -------------------------------------------
+// --- Channel trust -----------------------------------------------------------
+
+export interface ConversationTrustInfo {
+  meta?: { channel?: string | null; hmac_verified?: boolean | null } | null;
+}
+
+/**
+ * Whether the contact's email can stand as proof of identity in this
+ * conversation. Email inbox: the address mail is replied to (still spoofable
+ * as a sender, so the bot never cancels there; see aiResponder). Web widget:
+ * only with an HMAC-verified identity. Anything else: no.
+ */
+export function contactEmailTrusted(conversation: ConversationTrustInfo | null | undefined): boolean {
+  const channel = conversation?.meta?.channel ?? '';
+  if (channel === 'Channel::Email') return true;
+  if (channel === 'Channel::WebWidget') return conversation?.meta?.hmac_verified === true;
+  return false;
+}
+
+// --- Signatures ----------------------------------------------------------------
 
 export interface LinkConfirmation {
   email: string;
@@ -107,9 +147,25 @@ export function confirmationAttributes(
     shopify_email_link_confirmed_by: c.agentId,
     shopify_email_link_confirmed_at: c.at,
     shopify_email_link_sig: signLinkConfirmation(contactId, c),
-    shopify_email_link_suggested: '',
-    shopify_email_link_suggested_basis: '',
   };
+}
+
+function legacyPayload(contactId: number, email: string): string {
+  return ['legacy-v1', env.chatwootAccountId, String(contactId), email].join('|');
+}
+
+/** Signature written by the one-off snapshot of links that predate this change. */
+export function signLegacyLink(contactId: number, email: string): string {
+  return hmacHex(signingKey('legacy-link'), legacyPayload(contactId, email));
+}
+
+/** The pre-existing AI link, if it was captured by the signed snapshot. */
+export function readLegacyLink(contact: ContactLike): string | null {
+  const attrs = contact.custom_attributes ?? {};
+  const email = normalizeEmail(attrs['shopify_email_link'] as string | undefined);
+  const sig = attrs['shopify_email_link_legacy_sig'];
+  if (!email || typeof sig !== 'string') return null;
+  return constantTimeEqual(sig, signLegacyLink(contact.id, email)) ? email : null;
 }
 
 // --- Resolution ---------------------------------------------------------------
@@ -125,28 +181,20 @@ export async function findCustomerByExactEmail(
   return customer && normalizeEmail(customer.email) === wanted ? customer : null;
 }
 
-export function pendingSuggestion(contact: ContactLike): LinkSuggestion | null {
-  const attrs = contact.custom_attributes ?? {};
-  const email = normalizeEmail(attrs['shopify_email_link_suggested'] as string | undefined);
-  if (!email) return null;
-  const basis = attrs['shopify_email_link_suggested_basis'];
-  return {
-    email,
-    basis: typeof basis === 'string' && basis.trim() ? basis.trim() : 'Found in the customer’s message',
-  };
-}
-
 export async function resolveContactCustomer(
   contact: ContactLike,
   deps: LinkDeps,
-  opts: { loadOrders?: boolean } = {},
+  opts: { loadOrders?: boolean; trustContactEmail: boolean },
 ): Promise<ContactResolution> {
   const loadOrders = opts.loadOrders ?? true;
   const attrs = contact.custom_attributes ?? {};
   const contactEmail = normalizeEmail(contact.email);
   const link = normalizeEmail(attrs['shopify_email_link'] as string | undefined);
   const confirmation = readLinkConfirmation(contact);
-  const pending = pendingSuggestion(contact);
+  const legacy = readLegacyLink(contact);
+  const rawId = attrs['shopify_customer_id'];
+  const shopifyId = rawId != null && String(rawId).trim() ? Number(rawId) : NaN;
+  let ignoredAttributes = Boolean(link && !confirmation && !legacy && link !== contactEmail);
 
   const result = (
     status: LinkStatus,
@@ -162,84 +210,70 @@ export async function resolveContactCustomer(
     customerEmail: normalizeEmail(customer?.email),
     contactEmail,
     suggestion,
+    ignoredAttributes,
   });
 
   const ordersOf = async (c: ShopifyCustomer | null) =>
     c && loadOrders ? deps.fetchCustomerOrders(c.id) : [];
 
-  // 1. Explicit link to a different email.
-  if (link && link !== contactEmail) {
-    const customer = await findCustomerByExactEmail(deps, link);
-    if (customer && confirmation && confirmation.email === link) {
+  // 1. Agent-confirmed (signed) link.
+  if (confirmation) {
+    const customer = await findCustomerByExactEmail(deps, confirmation.email);
+    if (customer) {
       return result('verified', 'agent_confirmed', customer, await ordersOf(customer), null);
     }
-    if (customer) {
-      return result('suggested', 'unverified_link', customer, await ordersOf(customer), {
-        email: link,
-        basis: 'Linked automatically by the old AI matcher (not verified)',
-      });
-    }
-    // The linked email has no Shopify customer: fall through to the contact.
   }
 
   // 2. The contact's own email.
   if (contactEmail) {
-    const customer = await findCustomerByExactEmail(deps, contactEmail);
-    if (customer) {
-      const orders = await ordersOf(customer);
-      const extra =
-        orders.length === 0 && pending && pending.email !== contactEmail ? pending : null;
-      return result('verified', 'email_match', customer, orders, extra);
+    let customer = await findCustomerByExactEmail(deps, contactEmail);
+    // Search can lag behind; the sync's customer id helps only when it points
+    // at a customer with exactly this email.
+    if (!customer && Number.isFinite(shopifyId) && shopifyId > 0) {
+      const byId = await deps.fetchCustomer(shopifyId);
+      if (byId && normalizeEmail(byId.email) === contactEmail) customer = byId;
     }
-  }
-
-  // 3. A Shopify customer id on the contact (normally written by our sync, but
-  //    editable by anyone who can edit the contact): trust it only when the
-  //    customer's email matches, or an agent confirmed that email.
-  const rawId = attrs['shopify_customer_id'];
-  const shopifyId = rawId != null && String(rawId).trim() ? Number(rawId) : NaN;
-  if (Number.isFinite(shopifyId) && shopifyId > 0) {
-    const customer = await deps.fetchCustomer(shopifyId);
-    const customerEmail = normalizeEmail(customer?.email);
-    if (customer && customerEmail) {
-      if (customerEmail === contactEmail || confirmation?.email === customerEmail) {
-        return result(
-          'verified',
-          customerEmail === contactEmail ? 'email_match' : 'agent_confirmed',
-          customer,
-          await ordersOf(customer),
-          null,
-        );
+    if (customer) {
+      if (opts.trustContactEmail) {
+        return result('verified', 'email_match', customer, await ordersOf(customer), null);
       }
-      return result('suggested', 'shopify_id_mismatch', customer, await ordersOf(customer), {
-        email: customerEmail,
-        basis: 'Contact carries a Shopify customer id whose email differs from the sender',
+      return result('suggested', 'untrusted_email', customer, await ordersOf(customer), {
+        email: contactEmail,
+        basis:
+          'The sender’s email matches this customer, but this channel does not prove the sender owns that email',
+        source: { kind: 'contact_email' },
       });
     }
   }
 
-  // 4. A pending suggestion from the message text.
-  if (pending && pending.email !== contactEmail) {
-    const customer = await findCustomerByExactEmail(deps, pending.email);
+  // 3. A link made by the old AI matcher before this change (signed snapshot).
+  if (legacy && legacy !== contactEmail) {
+    const customer = await findCustomerByExactEmail(deps, legacy);
     if (customer) {
-      return result('suggested', 'message_suggestion', customer, await ordersOf(customer), pending);
+      return result('suggested', 'legacy_link', customer, await ordersOf(customer), {
+        email: legacy,
+        basis: 'Linked automatically by the old AI matcher (never verified)',
+        source: { kind: 'legacy_link' },
+      });
     }
   }
 
+  if (Number.isFinite(shopifyId) && shopifyId > 0) ignoredAttributes = true;
   return result('none', null, null, [], null);
 }
 
-/** Emails an agent may confirm for this contact (prevents linking arbitrary emails). */
-export function confirmableEmails(contact: ContactLike, resolution: ContactResolution): Set<string> {
+/**
+ * Emails an agent may confirm for this contact: ONLY server-derived
+ * candidates (the resolution's own suggestion and a live suggestion computed
+ * from the messages). Attribute values never qualify on their own.
+ */
+export function confirmableEmails(
+  resolution: ContactResolution,
+  liveSuggestion: LinkSuggestion | null,
+): Set<string> {
   const out = new Set<string>();
-  const attrs = contact.custom_attributes ?? {};
-  for (const v of [
-    attrs['shopify_email_link'],
-    attrs['shopify_email_link_suggested'],
-    resolution.suggestion?.email,
-    resolution.status === 'suggested' ? resolution.customerEmail : null,
-  ]) {
-    const e = normalizeEmail(v as string | undefined);
+  for (const v of [resolution.suggestion?.email, liveSuggestion?.email]) {
+    const e = normalizeEmail(v);
     if (e) out.add(e);
   }
   return out;

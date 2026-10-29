@@ -97,7 +97,17 @@ export type LinkStatus = 'verified' | 'suggested' | 'none';
 export interface CustomerLink {
   status: LinkStatus;
   basis: string | null;
-  suggestion: { email: string; basis: string } | null;
+  suggestion: {
+    email: string;
+    basis: string;
+    source?: {
+      kind: 'message' | 'subject' | 'contact_email' | 'legacy_link';
+      messageId?: number | null;
+      createdAt?: string | null;
+      excerpt?: string | null;
+    };
+  } | null;
+  ignoredAttributes?: boolean;
 }
 
 export interface LifetimeValue {

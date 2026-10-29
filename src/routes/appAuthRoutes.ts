@@ -2,7 +2,8 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { logger } from '../utils/logger.js';
 import { RateLimiter } from '../utils/rateLimit.js';
-import { mintToken, verifyToken, ACCESS_TTL_MS } from '../security/session.js';
+import { mintToken, verifyToken, ACCESS_TTL_MS, type AgentIdentity } from '../security/session.js';
+import { bumpGeneration, getGeneration } from '../security/agentGeneration.js';
 import { verifyAgentAccessToken, isAgentActive } from '../security/chatwootIdentity.js';
 import { audit } from '../services/audit.js';
 import { env } from '../config/env.js';
@@ -28,10 +29,10 @@ function clientKey(req: Request): string {
   return (doIp && doIp.trim()) || req.ip || 'unknown';
 }
 
-function tokens(agent: Parameters<typeof mintToken>[0]) {
+function tokens(agent: AgentIdentity, authAt: number, gen: number) {
   return {
-    accessToken: mintToken(agent, 'access'),
-    refreshToken: mintToken(agent, 'refresh'),
+    accessToken: mintToken(agent, 'access', { authAt, gen }),
+    refreshToken: mintToken(agent, 'refresh', { authAt, gen }),
     expiresInMs: ACCESS_TTL_MS,
     agent: { id: agent.id, name: agent.name, role: agent.role },
   };
@@ -72,7 +73,7 @@ router.post('/connect', async (req: Request, res: Response) => {
     via: 'session',
     outcome: 'ok',
   });
-  res.json(tokens(agent));
+  res.json(tokens(agent, Date.now(), await getGeneration(agent.id, { fresh: true })));
 });
 
 router.post('/refresh', async (req: Request, res: Response) => {
@@ -83,7 +84,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
   }
   const raw = (req.body as { refreshToken?: unknown } | undefined)?.refreshToken;
   const session = verifyToken(typeof raw === 'string' ? raw : null, 'refresh');
-  if (!session) {
+  if (!session || session.gen < (await getGeneration(session.id, { fresh: true }))) {
     res.status(401).json({ error: 'Session expired', code: 'auth_required' });
     return;
   }
@@ -102,14 +103,34 @@ router.post('/refresh', async (req: Request, res: Response) => {
     res.status(401).json({ error: 'Agent is no longer a member of this Chatwoot account', code: 'auth_required' });
     return;
   }
+  // Keeps the ORIGINAL connect time: the 30-day absolute cap can't be extended.
   res.json(
-    tokens({
-      id: session.id,
-      name: active.name ?? session.name,
-      email: active.email ?? session.email,
-      role: active.role ?? session.role,
-    }),
+    tokens(
+      {
+        id: session.id,
+        name: active.name ?? session.name,
+        email: active.email ?? session.email,
+        role: active.role ?? session.role,
+      },
+      session.authAt,
+      session.gen,
+    ),
   );
+});
+
+/** Sign out: revokes every session of this agent (all browsers). */
+router.post('/signout', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const raw = (req.body as { refreshToken?: unknown } | undefined)?.refreshToken;
+  const h = req.headers.authorization;
+  const access = typeof h === 'string' ? /^Bearer\s+(\S+)$/i.exec(h.trim())?.[1] : undefined;
+  const session =
+    verifyToken(access, 'access') ?? verifyToken(typeof raw === 'string' ? raw : null, 'refresh');
+  if (session) {
+    await bumpGeneration(session.id);
+    void audit({ action: 'auth.signout', actor: String(session.id), via: 'session', outcome: 'ok' });
+  }
+  res.json({ ok: true });
 });
 
 export default router;

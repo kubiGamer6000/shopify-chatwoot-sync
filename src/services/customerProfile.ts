@@ -108,6 +108,8 @@ export interface CustomerLinkDTO {
   basis: LinkBasis;
   /** A candidate account the agent can confirm with one click. */
   suggestion: LinkSuggestion | null;
+  /** Link-like contact attributes were present but ignored (unsigned). */
+  ignoredAttributes: boolean;
 }
 
 export interface CustomerProfile {
@@ -275,6 +277,7 @@ export async function buildCustomerProfile(resolution: ContactResolution): Promi
       status: resolution.status,
       basis: resolution.basis,
       suggestion: resolution.suggestion,
+      ignoredAttributes: resolution.ignoredAttributes,
     },
   };
 }

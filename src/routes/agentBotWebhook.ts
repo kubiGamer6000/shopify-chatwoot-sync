@@ -24,6 +24,7 @@ router.post('/', verifyChatwootWebhook('agentBot'), (req: Request, res: Response
   res.status(200).json({ received: true });
 
   const payload = req.body as ChatwootWebhookPayload;
+  const deliveryId = req.header('x-chatwoot-delivery') ?? null;
 
   if (payload.event !== 'message_created') return;
   if (payload.message_type !== 'incoming') return;
@@ -45,6 +46,12 @@ router.post('/', verifyChatwootWebhook('agentBot'), (req: Request, res: Response
   });
 
   void (async () => {
+    // Replays of a signed delivery (same X-Chatwoot-Delivery id) are dropped.
+    if (deliveryId && (await claim('wh-delivery', deliveryId, MESSAGE_DEDUPE_TTL_MS)) === 'duplicate') {
+      logger.info('Duplicate webhook delivery id, skipping', { conversationId: payload.conversation.id });
+      return;
+    }
+
     // Skip duplicate deliveries so the bot never answers the same message twice.
     // Fail SAFE: if the dedupe store is down we can't rule out a duplicate, so
     // the bot does not reply or act; a human takes the conversation.
