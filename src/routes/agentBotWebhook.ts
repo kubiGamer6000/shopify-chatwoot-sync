@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { enqueueAgentBotJob } from '../services/agentBotQueue.js';
-import { claimOnce } from '../services/cache.js';
+import { claim } from '../services/cache.js';
+import { handOffWithoutBot } from '../services/botSafety.js';
+import { verifyChatwootWebhook } from '../middleware/chatwootWebhookAuth.js';
 import type { ChatwootWebhookPayload } from '../types/chatwoot.js';
 
 const router = Router();
@@ -16,18 +17,14 @@ const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
  * receives conversation events for bot-owned (pending) conversations. We MUST
  * ack within Chatwoot's 5s timeout (otherwise it flips the conversation to open
  * and posts a bot-error activity), so we respond 200 immediately and process
- * asynchronously.
+ * asynchronously. The delivery is authenticated first (HMAC signature; see
+ * chatwootWebhookAuth.ts) and rejected with 401 otherwise.
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', verifyChatwootWebhook('agentBot'), (req: Request, res: Response) => {
   res.status(200).json({ received: true });
 
-  const secret = req.query['secret'] as string | undefined;
-  if (env.agentBotWebhookSecret && secret !== env.agentBotWebhookSecret) {
-    logger.warn('AgentBot webhook rejected: invalid secret');
-    return;
-  }
-
   const payload = req.body as ChatwootWebhookPayload;
+  const deliveryId = req.header('x-chatwoot-delivery') ?? null;
 
   if (payload.event !== 'message_created') return;
   if (payload.message_type !== 'incoming') return;
@@ -46,14 +43,24 @@ router.post('/', (req: Request, res: Response) => {
   logger.info('AgentBot webhook: incoming message', {
     conversationId: payload.conversation.id,
     senderId: payload.sender.id,
-    senderEmail: payload.sender.email,
   });
 
   void (async () => {
-    // Skip duplicate deliveries so the bot never answers the same message twice
-    // (fail-open when no cache is configured).
-    const fresh = await claimOnce('wh-agentbot', String(payload.id), MESSAGE_DEDUPE_TTL_MS);
-    if (!fresh) {
+    // Replays of a signed delivery (same X-Chatwoot-Delivery id) are dropped.
+    if (deliveryId && (await claim('wh-delivery', deliveryId, MESSAGE_DEDUPE_TTL_MS)) === 'duplicate') {
+      logger.info('Duplicate webhook delivery id, skipping', { conversationId: payload.conversation.id });
+      return;
+    }
+
+    // Skip duplicate deliveries so the bot never answers the same message twice.
+    // Fail SAFE: if the dedupe store is down we can't rule out a duplicate, so
+    // the bot does not reply or act; a human takes the conversation.
+    const claimed = await claim('wh-agentbot', String(payload.id), MESSAGE_DEDUPE_TTL_MS);
+    if (claimed === 'unavailable') {
+      await handOffWithoutBot(payload.conversation.id, 'duplicate-protection store unavailable');
+      return;
+    }
+    if (claimed === 'duplicate') {
       logger.info('Duplicate AgentBot webhook delivery, skipping', {
         conversationId: payload.conversation.id,
         messageId: payload.id,

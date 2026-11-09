@@ -53,12 +53,12 @@ Aggregator: [`src/services/customerProfile.ts`](../src/services/customerProfile.
 
 ## Auth
 
-Gated by a shared secret in `DASHBOARD_APP_TOKEN`:
-
-1. **Page load** — Chatwoot loads the iframe with `?token=<DASHBOARD_APP_TOKEN>`; without a valid token the server returns 401 and does not serve the SPA.
-2. **API calls** — the SPA reads `?token=` and sends it as the `x-app-token` header; `/app/api/*` rejects requests without a match.
-
-If `DASHBOARD_APP_TOKEN` is unset, both are left open (with a warning). The `/app` routes also set `Content-Security-Policy: frame-ancestors` so only Chatwoot can embed the app.
+Per-agent sign-in, no secret in the URL. Each agent connects once per browser
+with their own Chatwoot access token; the server verifies it with Chatwoot and
+issues a short-lived session. Every API call is scoped server-side to the
+conversation and audited with the agent id. Customers linked only by a
+suggestion show **Unverified** and a **Confirm link** button; cancellation needs
+a verified link and a reason. Details: [security.md](security.md).
 
 ## Local development
 
@@ -72,4 +72,4 @@ For production it is built to `web/dist` and served by Express; the root `npm ru
 
 ## Register in Chatwoot
 
-**Settings → Integrations → Dashboard Apps → Add a new dashboard app**, set the URL to `https://<domain>/app?token=<DASHBOARD_APP_TOKEN>`, save. A new tab appears in the conversation view.
+**Settings → Integrations → Dashboard Apps → Add a new dashboard app**, set the URL to `https://<domain>/app` (no token), save. Each agent then clicks **Connect** once in the tab ([security.md](security.md#3-customer-360-tab-authentication)). A new tab appears in the conversation view.

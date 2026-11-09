@@ -3,7 +3,9 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { verifyShopifyWebhook } from './middleware/verifyShopifyWebhook.js';
 import { syncAuth } from './middleware/syncAuth.js';
-import { appAuth, appPageAuth } from './middleware/appAuth.js';
+import { appAuth } from './middleware/appAuth.js';
+import { env } from './config/env.js';
+import appAuthRoutes from './routes/appAuthRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import webhookRoutes from './routes/webhooks.js';
 import syncRoutes from './routes/sync.js';
@@ -14,14 +16,36 @@ import adminApiRoutes from './routes/adminApi.js';
 
 const app = express();
 
+// One reverse proxy (DigitalOcean App Platform) in front: use its X-Forwarded-For
+// for rate-limit keys. Never echo framework details.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
+// Baseline security headers for every response.
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
 // Raw body parsing for webhook routes (required for HMAC verification)
 app.use('/webhooks', express.raw({ type: 'application/json' }));
 
-// Larger JSON limit for Chatwoot webhooks (payloads include full conversation history)
-app.use('/chatwoot', express.json({ limit: '5mb' }));
+// Larger JSON limit for Chatwoot webhooks (payloads include full conversation
+// history). The raw bytes are kept for HMAC signature verification.
+app.use(
+  '/chatwoot',
+  express.json({
+    limit: '5mb',
+    verify: (req, _res, buf) => {
+      (req as Request).rawBody = Buffer.from(buf);
+    },
+  }),
+);
 
 // JSON parsing for all other routes
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // Health check (used by DO App Platform to verify the app is running)
 app.get('/health', (_req, res) => {
@@ -43,17 +67,39 @@ app.use('/chatwoot', chatwootWebhookRoutes);
 
 // --- Chatwoot Dashboard App (Customer 360) ---
 
-// Agent-facing API consumed by the embedded SPA (shared-token protected).
-app.use('/app/api', appAuth, dashboardAppRoutes);
+// Only the configured Chatwoot origin may frame the tab (not *.chatwoot.com).
+const chatwootOrigin = (() => {
+  try {
+    return new URL(env.chatwootBaseUrl).origin;
+  } catch {
+    return 'https://app.chatwoot.com';
+  }
+})();
 
-// Allow the SPA to be embedded as an iframe inside the Chatwoot dashboard.
-function dashboardAppCsp(_req: Request, res: Response, next: NextFunction): void {
-  res.setHeader(
-    'Content-Security-Policy',
-    "frame-ancestors 'self' https://app.chatwoot.com https://*.chatwoot.com",
-  );
+const DASHBOARD_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  // Radix/React set inline style attributes.
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  `frame-ancestors ${chatwootOrigin}`,
+  "base-uri 'none'",
+  "form-action 'none'",
+  "object-src 'none'",
+].join('; ');
+
+function dashboardAppHeaders(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader('Content-Security-Policy', DASHBOARD_CSP);
   next();
 }
+
+// Sign-in for the tab (per-agent sessions; no secret in the URL).
+app.use('/app/auth', dashboardAppHeaders, appAuthRoutes);
+
+// Agent-facing API consumed by the embedded SPA (per-agent session required).
+app.use('/app/api', dashboardAppHeaders, appAuth, dashboardAppRoutes);
 
 // Serve the built SPA (Vite outputs to web/dist with base "/app/").
 // __dirname resolves to dist/ in production and src/ under tsx — both sit one
@@ -61,13 +107,14 @@ function dashboardAppCsp(_req: Request, res: Response, next: NextFunction): void
 const webDist = path.resolve(__dirname, '..', 'web', 'dist');
 
 function serveAppIndex(_req: Request, res: Response): void {
+  // The page holds no secrets; the API requires a per-agent session. A legacy
+  // `?token=` in the URL is never checked or logged here.
+  res.setHeader('Cache-Control', 'no-store');
   res.sendFile(path.join(webDist, 'index.html'));
 }
 
-// HTML entry points require ?token=… (see appPageAuth). Assets under /app/assets/
-// are public but contain no secrets; API calls still need the token header.
-app.get(['/app', '/app/'], dashboardAppCsp, appPageAuth, serveAppIndex);
-app.use('/app', dashboardAppCsp, express.static(webDist, { index: false }));
+app.get(['/app', '/app/'], dashboardAppHeaders, serveAppIndex);
+app.use('/app', dashboardAppHeaders, express.static(webDist, { index: false }));
 
 // --- Admin Control Dashboard (standalone, Firebase-Auth gated) ---
 
@@ -79,6 +126,7 @@ app.use('/admin/api', adminApiRoutes);
 // iframable (unlike the Chatwoot dashboard app).
 function adminCsp(_req: Request, res: Response, next: NextFunction): void {
   res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Frame-Options', 'DENY');
   next();
 }
 

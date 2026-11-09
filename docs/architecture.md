@@ -40,9 +40,9 @@ Independent flows run side by side:
 | `GET /health` | none | DO health probe |
 | `/webhooks/*` | Shopify HMAC | Shopify customer/order events |
 | `/sync/*` | `SYNC_API_KEY` bearer | Manual sync trigger |
-| `/chatwoot/agent-bot` | optional `?secret=` | AgentBot responder (pending convos) |
-| `/chatwoot` | optional `?secret=` | AI draft for open convos + classify |
-| `/app`, `/app/api/*` | `DASHBOARD_APP_TOKEN` | Customer 360 dashboard ([dashboard-app.md](dashboard-app.md)) |
+| `/chatwoot/agent-bot` | HMAC signature (fails closed) | AgentBot responder (pending convos) |
+| `/chatwoot` | HMAC signature (fails closed) | AI draft for open convos + classify |
+| `/app/auth/*`, `/app/api/*` | per-agent session ([security.md](security.md)) | Customer 360 dashboard ([dashboard-app.md](dashboard-app.md)) |
 | `/admin`, `/admin/api/*` | Firebase Auth (admin role) | Admin Control Dashboard ([admin-dashboard.md](admin-dashboard.md)) |
 
 Wiring lives in [`src/app.ts`](../src/app.ts); the entry point is [`src/server.ts`](../src/server.ts).

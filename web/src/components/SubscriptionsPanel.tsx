@@ -25,18 +25,20 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { useToast } from '@/components/Toast';
+import { Textarea } from '@/components/ui/textarea';
 
 export function SubscriptionsPanel({
   subscriptions,
   currency,
   conversationId,
-  email,
+  canCancel,
   onChanged,
 }: {
   subscriptions: SubscriptionDTO[];
   currency: string;
   conversationId: number | null;
-  email: string | null;
+  /** False until the customer link is verified (server enforces this too). */
+  canCancel: boolean;
   onChanged: () => void;
 }) {
   if (subscriptions.length === 0) {
@@ -67,7 +69,7 @@ export function SubscriptionsPanel({
           sub={sub}
           currency={currency}
           conversationId={conversationId}
-          email={email}
+          canCancel={canCancel}
           onChanged={onChanged}
         />
       ))}
@@ -79,18 +81,21 @@ function SubscriptionCard({
   sub,
   currency,
   conversationId,
-  email,
+  canCancel,
   onChanged,
 }: {
   sub: SubscriptionDTO;
   currency: string;
   conversationId: number | null;
-  email: string | null;
+  canCancel: boolean;
   onChanged: () => void;
 }) {
   const { notify } = useToast();
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [open, setOpen] = React.useState(false);
+  const [reason, setReason] = React.useState('');
+  const [notifyCustomer, setNotifyCustomer] = React.useState(true);
+  const reasonOk = reason.trim().length >= 3;
 
   // Each subscription is billed in its own currency (Skio `currencyCode`),
   // which can differ from the customer's order currency. Fall back to the
@@ -100,7 +105,12 @@ function SubscriptionCard({
   const handleCancel = async () => {
     setIsCancelling(true);
     try {
-      await cancelSubscription(sub.id, conversationId, email);
+      await cancelSubscription({
+        subscriptionId: sub.id,
+        conversationId,
+        reason: reason.trim(),
+        notifyCustomer,
+      });
       notify('success', 'Subscription cancelled.');
       setOpen(false);
       onChanged();
@@ -129,7 +139,18 @@ function SubscriptionCard({
               </Badge>
             )}
           </div>
-          {sub.isActive && (
+          {sub.isActive && !canCancel && (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 px-2.5"
+              disabled
+              title="Confirm the customer link first"
+            >
+              Cancel
+            </Button>
+          )}
+          {sub.isActive && canCancel && (
             <AlertDialog open={open} onOpenChange={setOpen}>
               <AlertDialogTrigger asChild>
                 <Button variant="destructive" size="sm" className="h-7 px-2.5">
@@ -144,6 +165,26 @@ function SubscriptionCard({
                     and the underlying Shopify contract. This cannot be undone.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium" htmlFor={`reason-${sub.id}`}>
+                    Reason (required)
+                  </label>
+                  <Textarea
+                    id={`reason-${sub.id}`}
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    maxLength={500}
+                    placeholder="e.g. Customer asked to cancel by email"
+                  />
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={notifyCustomer}
+                      onChange={(e) => setNotifyCustomer(e.target.checked)}
+                    />
+                    Send Skio's cancellation email to the customer
+                  </label>
+                </div>
                 <AlertDialogFooter>
                   <AlertDialogCancel disabled={isCancelling}>
                     Keep subscription
@@ -153,7 +194,7 @@ function SubscriptionCard({
                       e.preventDefault();
                       void handleCancel();
                     }}
-                    disabled={isCancelling}
+                    disabled={isCancelling || !reasonOk}
                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   >
                     {isCancelling && (

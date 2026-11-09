@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ChatwootAppContext, ResolvedContext } from './types';
+import { getAuthConfig } from './auth';
 
 const FETCH_INFO_EVENT = 'chatwoot-dashboard-app:fetch-info';
 
@@ -21,44 +22,26 @@ function parseEventData(data: unknown): ChatwootAppContext | null {
 function resolveContext(ctx: ChatwootAppContext): ResolvedContext {
   const sender = ctx.conversation?.meta?.sender;
   const contact = ctx.contact;
-
-  const customAttrs =
-    (contact?.custom_attributes as Record<string, unknown> | undefined) ??
-    (sender?.custom_attributes as Record<string, unknown> | undefined) ??
-    {};
-
-  const rawShopifyId = customAttrs['shopify_customer_id'];
-  const shopifyCustomerId =
-    rawShopifyId !== undefined && rawShopifyId !== null && rawShopifyId !== ''
-      ? String(rawShopifyId)
-      : null;
-
-  // An agent (or the AI matcher) can set `shopify_email_link` when the customer
-  // wrote in from a different address than the one on their Shopify account.
-  // When present it's authoritative: use it for the lookup and ignore any
-  // (likely absent/stale) Shopify id so the panel resolves the real customer.
-  const rawLink = customAttrs['shopify_email_link'];
-  const shopifyEmailLink =
-    typeof rawLink === 'string' && rawLink.trim() ? rawLink.trim() : null;
-
-  const defaultEmail = contact?.email || sender?.email || null;
-  const email = shopifyEmailLink || defaultEmail;
-  const contactName = contact?.name || sender?.name || null;
-  const conversationId = ctx.conversation?.id ?? null;
-  const contactId = contact?.id ?? sender?.id ?? null;
-
+  // Display-only values. The server derives the customer from the
+  // conversation id itself (it never trusts emails or ids sent from here).
   return {
-    conversationId,
-    contactId,
-    shopifyCustomerId: shopifyEmailLink ? null : shopifyCustomerId,
-    email,
-    contactName,
+    conversationId: ctx.conversation?.id ?? null,
+    contactId: contact?.id ?? sender?.id ?? null,
+    shopifyCustomerId: null,
+    email: contact?.email || sender?.email || null,
+    contactName: contact?.name || sender?.name || null,
+    currentAgentId: ctx.currentAgent?.id ?? null,
+    currentAgentName: ctx.currentAgent?.name ?? null,
   };
 }
 
+let chatwootOrigin: string | null = null;
+
 export function requestContext(): void {
+  if (!chatwootOrigin) return;
   try {
-    window.parent.postMessage(FETCH_INFO_EVENT, '*');
+    // Exact target origin (never '*').
+    window.parent.postMessage(FETCH_INFO_EVENT, chatwootOrigin);
   } catch {
     // ignore — not embedded in a parent frame
   }
@@ -79,8 +62,9 @@ export function useChatwootContext(): {
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      // Only trust messages from the parent (Chatwoot) frame.
+      // Only trust messages from the parent frame AND the Chatwoot origin.
       if (event.source !== window.parent) return;
+      if (!chatwootOrigin || event.origin !== chatwootOrigin) return;
 
       const appContext = parseEventData(event.data);
       if (!appContext) return;
@@ -90,8 +74,11 @@ export function useChatwootContext(): {
     };
 
     window.addEventListener('message', handleMessage);
-    // Ask Chatwoot for the current context as soon as we mount.
-    requestContext();
+    // Ask Chatwoot for the current context as soon as we know its origin.
+    void getAuthConfig().then((cfg) => {
+      chatwootOrigin = cfg.chatwootOrigin;
+      requestContext();
+    });
 
     return () => window.removeEventListener('message', handleMessage);
   }, []);

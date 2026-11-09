@@ -1,8 +1,13 @@
-import { env } from './config/env.js';
+import { env, assertSecuritySecrets } from './config/env.js';
 import app from './app.js';
 import { logger } from './utils/logger.js';
 import { startPeriodicSync } from './services/sync.js';
 import { startPendingSweeper } from './services/pendingSweeper.js';
+
+assertSecuritySecrets();
+if (env.legacyDashboardTokenEnabled && env.legacyDashboardTokenUntil == null) {
+  logger.warn('LEGACY_DASHBOARD_TOKEN_ENABLED is on but LEGACY_DASHBOARD_TOKEN_UNTIL is not set: the legacy token stays disabled');
+}
 
 const server = app.listen(env.port, () => {
   logger.info(`Server running on port ${env.port}`);

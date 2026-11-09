@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Inbox, KeyRound, Loader2, RefreshCw, SearchX } from 'lucide-react';
+import { AlertTriangle, Inbox, KeyRound, Link2, Loader2, RefreshCw, SearchX } from 'lucide-react';
 import { useChatwootContext } from '@/lib/chatwoot';
-import { hasAppToken } from '@/lib/auth';
-import { fetchCustomerProfile } from '@/lib/api';
+import { clearSession, connect, getLegacyToken, getSession, signOut } from '@/lib/auth';
+import {
+  AuthRequiredError,
+  confirmLink,
+  fetchCustomerProfile,
+  setClaimedAgentId,
+} from '@/lib/api';
+import { useToast } from '@/components/Toast';
+import { formatDateTime } from '@/lib/format';
 import type { CustomerProfile } from '@/lib/types';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -26,20 +33,36 @@ export function App() {
 }
 
 function Dashboard() {
-  const tokenOk = hasAppToken();
+  const [signedIn, setSignedIn] = useState<boolean>(
+    () => getSession() !== null || getLegacyToken() !== null,
+  );
   const { context } = useChatwootContext();
   const [profile, setProfile] = useState<CustomerProfile | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const shopifyCustomerId = context?.shopifyCustomerId ?? null;
-  const email = context?.email ?? null;
-  const contactId = context?.contactId ?? null;
+  const conversationId = context?.conversationId ?? null;
+
+  const [mismatchNotice, setMismatchNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!tokenOk || !context) return;
-    if (!shopifyCustomerId && !email) {
+    setClaimedAgentId(context?.currentAgentId ?? null);
+    // Someone else is using Chatwoot in this browser: drop the stored session
+    // and require them to connect as themselves.
+    const s = getSession();
+    if (s && context?.currentAgentId && s.agent.id !== context.currentAgentId) {
+      clearSession();
+      setMismatchNotice(
+        `This browser was connected as ${s.agent.name ?? `agent #${s.agent.id}`}, but Chatwoot shows ${context.currentAgentName ?? 'another agent'}. Please connect as yourself.`,
+      );
+      setSignedIn(false);
+    }
+  }, [context?.currentAgentId, context?.currentAgentName]);
+
+  useEffect(() => {
+    if (!signedIn || !context) return;
+    if (!conversationId) {
       setProfile(null);
       setError(null);
       return;
@@ -50,15 +73,15 @@ function Dashboard() {
     setError(null);
     setProfile(null);
 
-    fetchCustomerProfile({
-      shopifyCustomerId,
-      email,
-      contactId,
-      signal: controller.signal,
-    })
+    fetchCustomerProfile({ conversationId, signal: controller.signal })
       .then((data) => setProfile(data))
       .catch((err) => {
         if (err?.name === 'AbortError') return;
+        if (err instanceof AuthRequiredError) {
+          clearSession();
+          setSignedIn(false);
+          return;
+        }
         setError(err instanceof Error ? err.message : 'Failed to load profile');
       })
       .finally(() => {
@@ -66,7 +89,7 @@ function Dashboard() {
       });
 
     return () => controller.abort();
-  }, [tokenOk, context, shopifyCustomerId, email, contactId, reloadKey]);
+  }, [signedIn, context, conversationId, reloadKey]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
@@ -74,16 +97,39 @@ function Dashboard() {
     setProfile((p) => (p ? { ...p, aiSummary: summary } : p));
   }, []);
 
-  if (!tokenOk) {
+  if (!signedIn) {
     return (
       <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
-        <MissingTokenState />
+        {mismatchNotice && (
+          <div className="border-warning/40 bg-warning/10 rounded-lg border px-3 py-2.5 text-sm">
+            {mismatchNotice}
+          </div>
+        )}
+        <ConnectState
+          onConnected={() => {
+            setMismatchNotice(null);
+            setSignedIn(true);
+          }}
+        />
       </div>
     );
   }
 
+  const session = getSession();
+
   return (
     <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-4 p-3 sm:p-4">
+      {!session && getLegacyToken() && (
+        <div className="border-warning/40 bg-warning/10 flex items-start justify-between gap-2 rounded-lg border px-3 py-2.5 text-sm">
+          <span>
+            Using the old shared link (read-only: replies and cancellations are disabled). Connect
+            with your own Chatwoot token.
+          </span>
+          <Button variant="outline" size="sm" onClick={() => setSignedIn(false)}>
+            Connect
+          </Button>
+        </div>
+      )}
       {context === null ? (
         <WaitingState />
       ) : loading ? (
@@ -104,6 +150,7 @@ function Dashboard() {
         <SimplifiedView
           profile={profile}
           context={context}
+          onChanged={reload}
           onSummaryRefreshed={handleSummaryRefreshed}
         />
       ) : (
@@ -112,6 +159,104 @@ function Dashboard() {
           message="This conversation has no contact email or Shopify customer ID yet."
         />
       )}
+      {session && (
+        <p className="text-muted-foreground text-center text-xs">
+          Signed in as {session.agent.name ?? `agent #${session.agent.id}`} ·{' '}
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              void signOut().then(() => setSignedIn(false));
+            }}
+          >
+            Sign out
+          </button>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Shown when the customer link is only a suggestion: the agent checks the
+ * sender's identity and confirms with one click. Until then nothing can be
+ * cancelled and the AI never uses this account's details.
+ */
+function LinkSuggestionBanner({
+  profile,
+  conversationId,
+  onConfirmed,
+}: {
+  profile: CustomerProfile | null;
+  conversationId: number | null;
+  onConfirmed: () => void;
+}) {
+  const { notify } = useToast();
+  const [busy, setBusy] = useState(false);
+  const link = profile?.link;
+  const suggestion = link?.suggestion;
+  if (link?.ignoredAttributes && !suggestion) {
+    return (
+      <div className="border-warning/40 bg-warning/10 rounded-lg border px-3 py-2.5 text-xs">
+        This contact has a Shopify link set outside Customer 360. It was ignored, because contact
+        details can be edited by the customer.
+      </div>
+    );
+  }
+  if (!link || !suggestion || !conversationId) return null;
+  const isCurrent = link.status === 'suggested';
+
+  const handleConfirm = async () => {
+    setBusy(true);
+    try {
+      await confirmLink(conversationId, suggestion.email);
+      notify('success', 'Customer link confirmed.');
+      onConfirmed();
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to confirm the link.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border-warning/40 bg-warning/10 flex flex-col gap-2 rounded-lg border px-3 py-2.5 text-sm">
+      <div className="flex items-start gap-2">
+        <Link2 className="mt-0.5 size-4 shrink-0" />
+        <div className="min-w-0">
+          <p className="font-medium">
+            {isCurrent ? 'Suggested link — not verified' : 'Possible other account'}
+          </p>
+          <p className="text-muted-foreground">
+            {suggestion.basis}: <span className="break-all">{suggestion.email}</span>
+          </p>
+          {suggestion.source?.excerpt && (
+            <p className="text-muted-foreground mt-1 text-xs">
+              {suggestion.source.kind === 'subject' ? 'In the email subject' : 'In the customer’s message'}
+              {suggestion.source.createdAt ? ` of ${formatDateTime(suggestion.source.createdAt)}` : ''}:{' '}
+              <q className="italic">{suggestion.source.excerpt}</q>
+            </p>
+          )}
+          <p className="text-muted-foreground mt-1 text-xs">
+            Anyone can type an email or order number, and customers can change their own contact
+            details. Check identity in the conversation itself (name + address or order details)
+            before confirming. Until confirmed, the AI won’t share account details and
+            cancellations are blocked.
+          </p>
+        </div>
+      </div>
+      <div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || !getSession()}
+          title={getSession() ? undefined : 'Connect with your own Chatwoot token to confirm links'}
+          onClick={() => void handleConfirm()}
+        >
+          {busy && <RefreshCw className="size-4 animate-spin" />}
+          Confirm link
+        </Button>
+      </div>
     </div>
   );
 }
@@ -139,7 +284,12 @@ function Loaded({
 
   return (
     <>
-      <ProfileHeader customer={profile.customer} />
+      <ProfileHeader customer={profile.customer} linkStatus={profile.link?.status} />
+      <LinkSuggestionBanner
+        profile={profile}
+        conversationId={context.conversationId}
+        onConfirmed={onChanged}
+      />
       <SummaryRow profile={profile} />
 
       <CustomerSummary
@@ -167,7 +317,7 @@ function Loaded({
             subscriptions={profile.subscriptions}
             currency={profile.summary.currency}
             conversationId={context.conversationId}
-            email={profile.customer.email}
+            canCancel={profile.link?.status === 'verified' && getSession() !== null}
             onChanged={onChanged}
           />
         </TabsContent>
@@ -185,10 +335,12 @@ function Loaded({
 function SimplifiedView({
   profile,
   context,
+  onChanged,
   onSummaryRefreshed,
 }: {
   profile: CustomerProfile | null;
   context: ResolvedContext;
+  onChanged: () => void;
   onSummaryRefreshed: (summary: CustomerSummaryType) => void;
 }) {
   const summaryContext: SummaryContext = {
@@ -213,6 +365,12 @@ function SimplifiedView({
   return (
     <>
       <ProfileHeader customer={customer} />
+
+      <LinkSuggestionBanner
+        profile={profile}
+        conversationId={context.conversationId}
+        onConfirmed={onChanged}
+      />
 
       <div className="border-warning/40 bg-warning/10 text-warning-foreground/90 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm">
         <SearchX className="mt-0.5 size-4 shrink-0" />
@@ -304,18 +462,54 @@ function EmptyState({ title, message }: { title: string; message: string }) {
   );
 }
 
-function MissingTokenState() {
+function ConnectState({ onConnected }: { onConnected: () => void }) {
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await connect(token);
+      setToken('');
+      onConnected();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not connect.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Card>
-      <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+      <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
         <KeyRound className="text-muted-foreground size-6" />
-        <p className="font-medium">Missing access token</p>
-        <p className="text-muted-foreground max-w-sm text-sm">
-          Set the Chatwoot Dashboard App URL to{' '}
-          <code className="bg-muted rounded px-1 py-0.5 text-xs">
-            https://&lt;domain&gt;/app?token=&lt;DASHBOARD_APP_TOKEN&gt;
-          </code>
-        </p>
+        <div>
+          <p className="font-medium">Connect Customer 360</p>
+          <p className="text-muted-foreground mt-1 max-w-sm text-sm">
+            One-time step per browser. In Chatwoot open your avatar → Profile settings, copy your
+            Access Token and paste it here. It is checked with Chatwoot and not stored.
+          </p>
+        </div>
+        <form className="flex w-full max-w-sm flex-col gap-2" onSubmit={(e) => void handleConnect(e)}>
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            className="border-input rounded-md border bg-transparent px-3 py-2 text-sm"
+            placeholder="Chatwoot access token"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            aria-label="Chatwoot access token"
+          />
+          {error && <p className="text-destructive text-sm">{error}</p>}
+          <Button type="submit" disabled={busy || !token.trim()}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Connect
+          </Button>
+        </form>
       </CardContent>
     </Card>
   );

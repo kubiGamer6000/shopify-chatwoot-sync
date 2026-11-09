@@ -11,7 +11,10 @@
     "build": "npm run build:web && npm run build:admin && npm run build:server",
     "start": "node dist/server.js",
     "backfill": "tsx src/scripts/backfillOpenConversations.ts",
-    "review:agentbot": "tsx src/scripts/reviewAgentBot.ts"
+    "review:agentbot": "tsx src/scripts/reviewAgentBot.ts",
+    "test": "node --import tsx --import ./test/setup.ts --test --test-reporter=spec 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test/tsconfig.json",
+    "snapshot:legacy-links": "tsx src/scripts/snapshotLegacyLinks.ts"
   },
   "engines": {
     "node": "22.x"
@@ -26,9 +29,7 @@
     "csv-parse": "^6.2.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "firebase": "^12.16.0",
     "firebase-admin": "^13.10.0",
-    "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

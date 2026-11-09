@@ -122,35 +122,48 @@ export async function updateContact(
 }
 
 /**
- * Sets the `shopify_email_link` custom attribute on a contact so future Shopify
- * lookups (AI drafts, summaries, the dashboard quick panel) resolve against the
- * customer's real account email instead of the address they happened to write
- * from. Existing custom attributes are preserved by merging them back in, since
- * Chatwoot replaces the `custom_attributes` object wholesale on update.
- * Best-effort: failures are logged and swallowed so callers never break.
+ * Writes custom attributes on a contact, preserving the existing ones (they
+ * are merged back in so nothing is lost whatever Chatwoot's merge semantics).
+ * Throws on failure so callers can report it.
  */
-export async function linkShopifyEmail(
+export async function mergeContactAttributes(
   contactId: number,
-  email: string,
-  existingCustomAttributes: Record<string, unknown> = {},
-): Promise<boolean> {
-  try {
-    const merged = {
-      ...existingCustomAttributes,
-      shopify_email_link: email,
-    } as ChatwootContactPayload['custom_attributes'];
+  existingCustomAttributes: Record<string, unknown>,
+  patch: Record<string, string>,
+): Promise<void> {
+  const merged = {
+    ...existingCustomAttributes,
+    ...patch,
+  } as ChatwootContactPayload['custom_attributes'];
+  await updateContact(contactId, { custom_attributes: merged });
+  logger.info('Updated contact link attributes', { contactId, keys: Object.keys(patch) });
+}
 
-    await updateContact(contactId, { custom_attributes: merged });
-    logger.info('Linked Shopify email to Chatwoot contact', { contactId, email });
-    return true;
+/** Fetches a contact by id within the configured account. */
+export async function getContact(contactId: number): Promise<ChatwootContact | null> {
+  try {
+    const res = await chatwootClient.get<{ payload?: ChatwootContact } & ChatwootContact>(
+      `/contacts/${contactId}`,
+    );
+    return res.data.payload ?? res.data;
   } catch (err) {
-    logger.warn('Failed to set shopify_email_link custom attribute', {
-      contactId,
-      email,
-      detail: extractErrorDetail(err),
-    });
-    return false;
+    if (err instanceof AxiosError && err.response?.status === 404) return null;
+    throw err;
   }
+}
+
+export interface ChatwootAgent {
+  id: number;
+  name?: string;
+  email?: string;
+  role?: string;
+  confirmed?: boolean;
+}
+
+/** Lists the account's agents (used to re-check that a session's agent still exists). */
+export async function listAgents(): Promise<ChatwootAgent[]> {
+  const res = await chatwootClient.get<ChatwootAgent[]>('/agents');
+  return Array.isArray(res.data) ? res.data : [];
 }
 
 /**

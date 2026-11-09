@@ -37,6 +37,12 @@ export function decideRoute(params: {
   startedByUs: boolean;
   /** At least one unanswered customer message has readable body text. */
   latestHasText: boolean;
+  /**
+   * The sender is not verified as the account holder, but a possible account
+   * match exists (old AI link, or an order number / email in the message). A
+   * human must check identity before anything account-related is answered.
+   */
+  identityNeedsAgentCheck?: boolean;
 }): RouteDecision {
   const decision = baseRoute(params);
   if (decision.route !== 'respond') return decision;
@@ -49,6 +55,13 @@ export function decideRoute(params: {
   // read: empty bodies often hide disputes stated only in the subject.
   if (!params.latestHasText) {
     return { ...decision, route: 'acknowledge', reason: 'customer message has no readable text' };
+  }
+  if (params.identityNeedsAgentCheck) {
+    return {
+      ...decision,
+      route: 'acknowledge',
+      reason: 'sender identity not verified (possible account match needs agent confirmation)',
+    };
   }
   return decision;
 }

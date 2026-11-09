@@ -34,6 +34,79 @@ export function toE164(phone: string | undefined | null): string | undefined {
   return undefined;
 }
 
+// --- Lifetime value (per currency, net of refunds) ---------------------------
+
+export interface CurrencyTotal {
+  currency: string;
+  /** Sum of order totals, minor units (cents). */
+  grossMinor: number;
+  /** Sum of successful refund transactions, minor units. */
+  refundedMinor: number;
+  /** gross - refunded, minor units. */
+  netMinor: number;
+}
+
+/** Parses a decimal money string ("12.5", "-3.00") into integer minor units. */
+export function toMinorUnits(amount: string | number | null | undefined): number {
+  if (amount == null) return 0;
+  const str = String(amount).trim();
+  const m = /^(-)?(\d*)(?:\.(\d*))?$/.exec(str);
+  if (!m) return 0;
+  const sign = m[1] ? -1 : 1;
+  const whole = Number(m[2] || '0');
+  const frac = Number(((m[3] ?? '') + '00').slice(0, 2));
+  return sign * (whole * 100 + frac);
+}
+
+export function fromMinorUnits(minor: number): string {
+  const sign = minor < 0 ? '-' : '';
+  const abs = Math.abs(minor);
+  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+}
+
+// Orders whose payment was never captured do not count towards value.
+const NON_REVENUE_STATUSES = new Set(['voided', 'expired']);
+
+/**
+ * Lifetime value per currency. Different currencies are never summed together,
+ * and successful refunds are subtracted (security/accuracy fix P7). Sorted by
+ * net value, largest first.
+ */
+export function lifetimeValue(orders: ShopifyOrder[]): CurrencyTotal[] {
+  const totals = new Map<string, CurrencyTotal>();
+  const bucket = (currency: string): CurrencyTotal => {
+    const key = (currency || 'UNKNOWN').toUpperCase();
+    let t = totals.get(key);
+    if (!t) {
+      t = { currency: key, grossMinor: 0, refundedMinor: 0, netMinor: 0 };
+      totals.set(key, t);
+    }
+    return t;
+  };
+
+  for (const order of orders) {
+    if (NON_REVENUE_STATUSES.has((order.financial_status ?? '').toLowerCase())) continue;
+    bucket(order.currency).grossMinor += toMinorUnits(order.total_price);
+    for (const refund of order.refunds ?? []) {
+      for (const tx of refund.transactions ?? []) {
+        if ((tx.kind ?? '').toLowerCase() !== 'refund') continue;
+        if ((tx.status ?? '').toLowerCase() !== 'success') continue;
+        bucket(tx.currency || order.currency).refundedMinor += toMinorUnits(tx.amount);
+      }
+    }
+  }
+
+  const list = [...totals.values()].map((t) => ({ ...t, netMinor: t.grossMinor - t.refundedMinor }));
+  return list.sort((a, b) => b.netMinor - a.netMinor);
+}
+
+/** "123.40 EUR + 450.00 SEK" (net of refunds), or "0.00 <fallback>". */
+export function formatLifetimeValue(orders: ShopifyOrder[], fallbackCurrency = 'EUR'): string {
+  const totals = lifetimeValue(orders);
+  if (totals.length === 0) return `0.00 ${fallbackCurrency}`;
+  return totals.map((t) => `${fromMinorUnits(t.netMinor)} ${t.currency}`).join(' + ');
+}
+
 export function countSubscriptionOrders(orders: ShopifyOrder[]): number {
   return orders.filter((order) => {
     if (!order.tags) return false;
@@ -115,16 +188,13 @@ export function buildCustomAttributes(
   );
   const latest = sorted[0];
 
-  const totalSpent = orders
-    .reduce((sum, o) => sum + parseFloat(o.total_price || "0"), 0)
-    .toFixed(2);
   const currency = latest?.currency ?? customer.currency ?? "USD";
 
   const attrs: Partial<ChatwootCustomAttributes> = {
     shopify_customer_id: String(customer.id),
     shopify_url: `https://${env.shopifyStoreDomain}/admin/customers/${customer.id}`,
     total_orders: orders.length,
-    total_spent: `${totalSpent} ${currency}`,
+    total_spent: formatLifetimeValue(orders, currency),
     subscription_orders: countSubscriptionOrders(orders),
     default_address: formatAddress(customer.default_address),
     recent_orders: formatOrdersSummary(sorted),

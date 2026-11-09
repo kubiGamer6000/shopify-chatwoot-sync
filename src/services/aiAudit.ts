@@ -1,5 +1,6 @@
 import { getDb } from './firestore.js';
 import { logger } from '../utils/logger.js';
+import { alert } from './alert.js';
 
 /**
  * Best-effort audit logging for AI activity. Every function here is a no-op when
@@ -33,7 +34,7 @@ export async function recordAiUsage(entry: AiUsageEntry): Promise<void> {
       ts: Date.now(),
     });
   } catch (err) {
-    logger.warn('Failed to record AI usage', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record AI usage', { error: errMessage(err) });
   }
 }
 
@@ -61,7 +62,7 @@ export async function recordClassification(
       .doc(String(entry.conversationId))
       .set({ ...entry, at: new Date().toISOString(), ts: Date.now() }, { merge: true });
   } catch (err) {
-    logger.warn('Failed to record classification', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record classification', { error: errMessage(err) });
   }
 }
 
@@ -89,7 +90,7 @@ export async function recordAgentBotDecision(
       .doc(String(entry.conversationId))
       .set({ ...entry, at: new Date().toISOString(), ts: Date.now() }, { merge: true });
   } catch (err) {
-    logger.warn('Failed to record AgentBot decision', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record AgentBot decision', { error: errMessage(err) });
   }
 }
 
@@ -127,7 +128,7 @@ export async function recordResponderGuardEvent(
       ts: Date.now(),
     });
   } catch (err) {
-    logger.warn('Failed to record responder guard event', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record responder guard event', { error: errMessage(err) });
   }
 }
 
@@ -135,6 +136,29 @@ export interface SentReplyRecord {
   conversationId: number;
   message: string;
   source: 'dashboard' | 'agent-bot' | 'agent-bot-holding';
+  /** Chatwoot agent id for dashboard sends. */
+  agentId?: number | string | null;
+}
+
+// Per-process record of bot messages, so the per-conversation cap still holds
+// when Firestore reads or writes fail (the cap uses the larger of the two).
+const memoryBotSends = new Map<number, number[]>();
+
+function rememberBotSend(conversationId: number, ts: number): void {
+  const list = (memoryBotSends.get(conversationId) ?? []).filter(
+    (t) => t > ts - 2 * 24 * 60 * 60 * 1000,
+  );
+  list.push(ts);
+  memoryBotSends.set(conversationId, list);
+  if (memoryBotSends.size > 5000) {
+    const oldest = memoryBotSends.keys().next().value;
+    if (oldest !== undefined) memoryBotSends.delete(oldest);
+  }
+}
+
+/** Test helper. */
+export function resetMemoryBotSends(): void {
+  memoryBotSends.clear();
 }
 
 /**
@@ -143,6 +167,7 @@ export interface SentReplyRecord {
  * prompt).
  */
 export async function recordSentReply(entry: SentReplyRecord): Promise<void> {
+  if (entry.source.startsWith('agent-bot')) rememberBotSend(entry.conversationId, Date.now());
   const db = getDb();
   if (!db) return;
   try {
@@ -152,32 +177,41 @@ export async function recordSentReply(entry: SentReplyRecord): Promise<void> {
       ts: Date.now(),
     });
   } catch (err) {
-    logger.warn('Failed to record sent reply', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record sent reply', { error: errMessage(err) });
   }
 }
 
 /**
  * Counts public messages the AgentBot sent to a conversation since `sinceMs`
- * (answers, acknowledgements and holding replies). Fails open to 0.
+ * (answers, acknowledgements and holding replies). Returns `null` when the
+ * durable log cannot be read: callers must then treat the cap as reached
+ * (fail safe), never as zero.
  */
 export async function countRecentBotMessages(
   conversationId: number,
   sinceMs: number,
-): Promise<number> {
+): Promise<number | null> {
+  const inMemory = (memoryBotSends.get(conversationId) ?? []).filter((t) => t >= sinceMs).length;
   const db = getDb();
-  if (!db) return 0;
+  if (!db) {
+    alert('bot-cap-store-unavailable', 'Firestore not configured; bot reply cap cannot be checked');
+    return null;
+  }
   try {
     const snap = await db
       .collection('sentReplies')
       .where('conversationId', '==', conversationId)
       .get();
-    return snap.docs.filter((d) => {
+    const stored = snap.docs.filter((d) => {
       const data = d.data() as { source?: string; ts?: number };
       return (data.source ?? '').startsWith('agent-bot') && (data.ts ?? 0) >= sinceMs;
     }).length;
+    return Math.max(stored, inMemory);
   } catch (err) {
-    logger.warn('Failed to count recent bot messages', { error: errMessage(err) });
-    return 0;
+    alert('bot-cap-store-unavailable', 'Failed to count recent bot messages', {
+      error: errMessage(err),
+    });
+    return null;
   }
 }
 
@@ -211,6 +245,6 @@ export async function recordShadowAcknowledgement(
       ts: Date.now(),
     });
   } catch (err) {
-    logger.warn('Failed to record shadow acknowledgement', { error: errMessage(err) });
+    alert('ai-log-write-failed', 'Failed to record shadow acknowledgement', { error: errMessage(err) });
   }
 }

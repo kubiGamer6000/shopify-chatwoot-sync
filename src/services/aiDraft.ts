@@ -1,7 +1,5 @@
-import { createHash } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger.js';
-import { cacheGet, cacheSet } from './cache.js';
 import { getAiConfig } from './appConfig.js';
 import {
   getConversationMessages,
@@ -11,14 +9,20 @@ import {
   getConversationLabels,
   addConversationLabels,
 } from './chatwootConversation.js';
-import { fetchCustomerOrders, searchCustomerByEmail } from './shopify.js';
 import { getTrackingStatus } from './tracking.js';
 import {
   gatherCustomerImages,
   toUserContent,
   type CustomerImage,
 } from './attachments.js';
-import { resolveUnmatchedCustomer } from './customerResolver.js';
+import {
+  contactEmailTrusted,
+  resolveContactCustomer,
+  type ContactResolution,
+  type LinkSuggestion,
+} from './contactLink.js';
+import { customerTexts, findLinkSuggestion, type CustomerText } from './linkSuggestions.js';
+import { shopifyLinkDeps } from './conversationScope.js';
 import { classifyConversation } from './classifier.js';
 import { generateStructuredDraft, type StructuredDraft } from './claude.js';
 import {
@@ -31,22 +35,25 @@ import type { ShopifyCustomer, ShopifyOrder } from '../types/index.js';
 import type { TrackingSummary } from '../types/tracking.js';
 
 /**
- * Signals about how the contact resolved to a Shopify account, used to decide
- * whether the AI matcher tools should run and how the draft prompt is shaped.
+ * Signals about how the contact resolved to a Shopify account.
  */
 export interface DraftLookupMeta {
-  // True when the resolved Shopify customer has at least one order.
+  // True when the VERIFIED Shopify customer has at least one order.
   matched: boolean;
-  // True when a `shopify_email_link` override is already set on the contact.
-  alreadyLinked: boolean;
+  // How the contact links to Shopify (see contactLink.ts).
+  linkStatus: ContactResolution['status'];
+  // A pending/possible match an agent can confirm.
+  suggestion: LinkSuggestion | null;
   // The contact's default Chatwoot email.
   chatwootEmail: string | null;
-  // The override email, when present.
-  shopifyEmailLink: string | null;
-  // Current contact custom attributes (preserved when writing the link back).
+  // The Chatwoot contact id (from the API, not the webhook payload).
+  contactId: number;
+  // Current contact custom attributes.
   customAttributes: Record<string, unknown>;
   // Concatenated text of the customer's messages in the current conversation.
   customerMessage: string;
+  // Customer-authored texts (for live suggestions with their source message).
+  customerTexts: CustomerText[];
 }
 
 export interface GatheredDraftContext {
@@ -54,56 +61,40 @@ export interface GatheredDraftContext {
   lookup: DraftLookupMeta;
 }
 
-// Negative-result cache for the Shopify matcher agent (keyed by contact +
-// message hash). 12h is long enough to absorb redeliveries/regenerations but
-// short enough that a customer who later provides better info is retried.
-const MATCH_NEG_CACHE_NS = 'shopifyMatchNeg';
-const MATCH_NEG_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-
-function hashMessage(message: string): string {
-  return createHash('sha1').update(message).digest('hex').slice(0, 16);
-}
-
 /**
  * Gathers all Chatwoot + Shopify + tracking context for a conversation and
  * returns a ready-to-use PromptContext plus lookup metadata. Shared by the
- * incoming-message webhook flow and the on-demand dashboard composer.
+ * incoming-message webhook flow, the AgentBot and the dashboard composer.
  *
- * Lookup precedence: an explicit `shopify_email_link` override wins, then the
- * Shopify customer id, then the contact's default email.
+ * The contact is taken from the conversation as returned by the Chatwoot API
+ * (never from the webhook payload or the browser). Order and customer data is
+ * included ONLY when the link is verified (contactLink.ts); otherwise the AI
+ * sees no account data at all.
  */
 export async function gatherDraftContext(params: {
   conversationId: number;
-  contactId: number;
+  contactId?: number | null;
   email?: string | null;
 }): Promise<GatheredDraftContext> {
-  const { conversationId, contactId } = params;
+  const { conversationId } = params;
 
-  // Phase 1: Fetch Chatwoot context in parallel
-  const [messagesRes, conversationDetails, contactConversations] = await Promise.all([
+  const conversationDetails = await getConversationDetails(conversationId);
+  const sender = conversationDetails.meta?.sender;
+  const contactId = sender?.id ?? params.contactId;
+  if (!contactId) throw new Error('Conversation has no contact');
+
+  const [messagesRes, contactConversations] = await Promise.all([
     getConversationMessages(conversationId),
-    getConversationDetails(conversationId),
     getContactConversations(contactId),
   ]);
 
   const currentMessages = messagesRes.payload;
-  const customerName = conversationDetails.meta?.sender?.name;
+  const customerName = sender?.name;
 
   const customAttributes =
-    (conversationDetails.meta?.sender?.custom_attributes as
-      | Record<string, unknown>
-      | undefined) ?? {};
+    (sender?.custom_attributes as Record<string, unknown> | undefined) ?? {};
 
-  const chatwootEmail =
-    conversationDetails.meta?.sender?.email || params.email || null;
-
-  const rawLink = customAttributes['shopify_email_link'];
-  const shopifyEmailLink =
-    typeof rawLink === 'string' && rawLink.trim() ? rawLink.trim() : null;
-
-  // The email used for Shopify lookups: explicit override wins over the
-  // contact's default address.
-  const email = shopifyEmailLink || chatwootEmail || undefined;
+  const chatwootEmail = sender?.email || null;
 
   // Extract email subject: conversation-level first, then fall back to first message
   const mailSubject =
@@ -119,48 +110,33 @@ export async function gatherDraftContext(params: {
   const incomingCount = currentMessages.filter((m) => m.message_type === 0 && !m.private).length;
   const isNewConversation = incomingCount <= 1;
 
-  // Phase 2: Look up Shopify customer
-  let shopifyCustomer: ShopifyCustomer | null = null;
-  let orders: ShopifyOrder[] = [];
-
-  const shopifyCustomerId = customAttributes['shopify_customer_id'] as
-    | string
-    | undefined;
-
-  if (shopifyCustomerId) {
-    logger.debug('Found Shopify customer ID in Chatwoot custom attributes', {
-      shopifyCustomerId,
+  // Phase 2: Resolve the Shopify customer. Only a VERIFIED link feeds the AI.
+  let resolution: ContactResolution;
+  try {
+    resolution = await resolveContactCustomer(
+      { id: contactId, email: chatwootEmail, custom_attributes: customAttributes },
+      shopifyLinkDeps,
+      { trustContactEmail: contactEmailTrusted(conversationDetails) },
+    );
+  } catch (err) {
+    logger.warn('Failed to resolve Shopify customer for contact', {
+      contactId,
+      error: err instanceof Error ? err.message : String(err),
     });
-    try {
-      orders = await fetchCustomerOrders(Number(shopifyCustomerId));
-      shopifyCustomer = { id: Number(shopifyCustomerId) } as ShopifyCustomer;
-    } catch (err) {
-      logger.warn('Failed to fetch orders by Shopify ID', {
-        shopifyCustomerId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    resolution = {
+      status: 'none',
+      basis: null,
+      customer: null,
+      orders: [],
+      customerEmail: null,
+      contactEmail: chatwootEmail,
+      suggestion: null,
+      ignoredAttributes: false,
+    };
   }
-
-  if (orders.length === 0 && email) {
-    try {
-      shopifyCustomer = await searchCustomerByEmail(email);
-      if (shopifyCustomer) {
-        logger.info('Found Shopify customer by email', {
-          shopifyCustomerId: shopifyCustomer.id,
-          email,
-        });
-        orders = await fetchCustomerOrders(shopifyCustomer.id);
-      } else {
-        logger.info('No Shopify customer found for email', { email });
-      }
-    } catch (err) {
-      logger.warn('Failed to search Shopify customer by email', {
-        email,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  const verified = resolution.status === 'verified';
+  const shopifyCustomer: ShopifyCustomer | null = verified ? resolution.customer : null;
+  const orders: ShopifyOrder[] = verified ? resolution.orders : [];
 
   // Phase 3: Fetch tracking status for last 2 fulfilled orders
   let trackingByNumber = new Map<string, TrackingSummary>();
@@ -184,7 +160,7 @@ export async function gatherDraftContext(params: {
     .join('\n\n');
 
   // The order number / alternate email often lives in the email subject (e.g.
-  // "WHERES MY ORDER #11789??"), so include it for the matcher agent.
+  // "WHERES MY ORDER #11789??"), so include it for suggestions.
   const customerMessage = [
     mailSubject ? `Subject: ${mailSubject}` : '',
     customerMessageBody,
@@ -195,7 +171,8 @@ export async function gatherDraftContext(params: {
   return {
     context: {
       customerName,
-      customerEmail: email,
+      // Verified customer's email, else the sender's own address.
+      customerEmail: (verified ? resolution.customerEmail : null) ?? chatwootEmail ?? undefined,
       shopifyCustomer,
       orders,
       trackingByNumber,
@@ -204,14 +181,21 @@ export async function gatherDraftContext(params: {
       conversationId,
       isNewConversation,
       emailSubject: mailSubject,
+      channel: conversationDetails.meta?.channel ?? null,
+      identity: {
+        status: resolution.status,
+        hasCandidate: resolution.status === 'suggested' || resolution.suggestion !== null,
+      },
     },
     lookup: {
       matched: orders.length > 0,
-      alreadyLinked: Boolean(shopifyEmailLink),
+      linkStatus: resolution.status,
+      suggestion: resolution.suggestion,
       chatwootEmail,
-      shopifyEmailLink,
+      contactId,
       customAttributes,
       customerMessage,
+      customerTexts: customerTexts(currentMessages, mailSubject),
     },
   };
 }
@@ -232,32 +216,6 @@ const LOOKUP_GUIDANCE =
   'number or the email address they used at checkout so you can pull it up. If ' +
   'their request does NOT need order data (e.g. a general/business enquiry, a ' +
   'product question), just answer normally and do not ask for an order number.';
-
-/**
- * Merges a successful resolution back into the prompt context: replaces the
- * orders + customer and recomputes tracking so the draft is written with the
- * real, full customer history.
- */
-async function applyResolution(
-  ctx: PromptContext,
-  resolved: { shopifyCustomer: ShopifyCustomer | null; orders: ShopifyOrder[]; linkedEmail: string | null },
-): Promise<void> {
-  ctx.orders = resolved.orders;
-  ctx.shopifyCustomer = resolved.shopifyCustomer;
-  if (resolved.linkedEmail) ctx.customerEmail = resolved.linkedEmail;
-
-  ctx.trackingByNumber = new Map();
-  const trackingNumbers = extractTrackingNumbers(resolved.orders);
-  if (trackingNumbers.length > 0) {
-    try {
-      ctx.trackingByNumber = await getTrackingStatus(trackingNumbers);
-    } catch (err) {
-      logger.warn('Failed to fetch tracking status after resolution', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
 
 /**
  * Formats a structured draft for posting as a Chatwoot private note. The
@@ -312,15 +270,16 @@ export function formatDraftNote(draft: StructuredDraft, handoff?: HandoffSummary
 }
 
 /**
- * Gathers the prompt context and runs the Shopify matcher agent when the
- * contact isn't matched to an account with orders (and isn't already linked).
- * Sets the "ask for order number / email" guidance when no order data is
- * available. Shared by the AI-draft flow and the autonomous AgentBot responder.
+ * Gathers the prompt context and, when the contact has no verified account
+ * with orders, looks for an email / order number in the customer's message.
+ * A hit is stored on the contact as a PENDING SUGGESTION for an agent to
+ * confirm in the Customer 360 tab; it is never linked automatically and never
+ * fed to the AI. Shared by the AI-draft flow and the autonomous AgentBot.
  */
 export async function gatherContextWithMatching(
   params: {
     conversationId: number;
-    contactId: number;
+    contactId?: number | null;
     email?: string | null;
   },
   opts: { dryRun?: boolean } = {},
@@ -328,42 +287,27 @@ export async function gatherContextWithMatching(
   const dryRun = opts.dryRun ?? false;
   const { context: ctx, lookup } = await gatherDraftContext(params);
 
-  if (!lookup.matched && !lookup.alreadyLinked) {
-    // The matcher is an expensive Claude tool loop. Its RESULT depends purely on
-    // the customer's message text, so we cache "no match found for THIS exact
-    // message" to avoid re-running it for redeliveries / regenerations. A new
-    // message (e.g. one that now includes an order number) has a different hash
-    // → cache miss → the matcher runs again, so we never miss a real match.
-    const negKey = `${params.contactId}:${hashMessage(lookup.customerMessage)}`;
-    const knownNoMatch = await cacheGet<boolean>(MATCH_NEG_CACHE_NS, negKey);
-
-    if (knownNoMatch) {
-      logger.info('Skipping Shopify matcher (cached no-match for this message)', {
+  if (!lookup.matched && !lookup.suggestion) {
+    // Computed live from the customer's messages on every run; nothing is
+    // stored on the contact (contact attributes are customer-writable).
+    const suggestion = await findLinkSuggestion(
+      lookup.customerTexts,
+      lookup.chatwootEmail,
+      shopifyLinkDeps,
+    ).catch(() => null);
+    if (suggestion) {
+      lookup.suggestion = suggestion;
+      ctx.identity = { status: ctx.identity?.status ?? 'none', hasCandidate: true };
+      logger.info('Possible account match found in message (pending agent confirmation)', {
         conversationId: params.conversationId,
-        contactId: params.contactId,
-      });
-    } else {
-      logger.info('Contact unmatched — running Shopify matcher agent', {
-        conversationId: params.conversationId,
-        contactId: params.contactId,
-      });
-      const resolved = await resolveUnmatchedCustomer({
-        contactId: params.contactId,
-        customerMessage: lookup.customerMessage,
-        chatwootEmail: lookup.chatwootEmail,
-        existingCustomAttributes: lookup.customAttributes,
+        contactId: lookup.contactId,
         dryRun,
       });
-      if (resolved.resolved) {
-        await applyResolution(ctx, resolved);
-      } else if (!dryRun) {
-        await cacheSet(MATCH_NEG_CACHE_NS, negKey, true, MATCH_NEG_CACHE_TTL_MS);
-      }
     }
   }
 
   // Still no order data? Tell the AI to ask for an order number / email.
-  if (ctx.orders.length === 0) {
+  if (ctx.orders.length === 0 && !ctx.identity?.hasCandidate) {
     ctx.lookupGuidance = LOOKUP_GUIDANCE;
   }
 
@@ -470,7 +414,11 @@ export async function postAiDraft(params: {
     return;
   }
 
-  await postPrivateNote(conversationId, formatDraftNote(draft, params.handoff));
+  const identityNote =
+    ctx.identity && ctx.identity.status !== 'verified' && ctx.identity.hasCandidate
+      ? '[ACCOUNT MATCH NOT VERIFIED]\nA possible Shopify account match was found for this sender. Check their identity and confirm the link in the Customer 360 tab before sharing any order or account details.\n\n---\n'
+      : '';
+  await postPrivateNote(conversationId, identityNote + formatDraftNote(draft, params.handoff));
   await storeDraft({
     conversationId,
     contactId,
@@ -518,10 +466,9 @@ export async function generateResponse(params: {
   const { context: ctx } = await gatherDraftContext({
     conversationId: params.conversationId,
     contactId: params.contactId,
-    email: params.email,
   });
 
-  if (ctx.orders.length === 0) {
+  if (ctx.orders.length === 0 && !ctx.identity?.hasCandidate) {
     ctx.lookupGuidance = LOOKUP_GUIDANCE;
   }
 

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 const required = [
   'SHOPIFY_STORE_DOMAIN',
@@ -71,4 +72,73 @@ export const env = {
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean),
+
+  // --- Security hardening (see docs/security.md) ---
+
+  // Signs agent sessions (Customer 360 tab). Required outside development.
+  appSessionSecret: process.env.APP_SESSION_SECRET || '',
+  // Signs agent-confirmed contact links and legacy-link snapshots. A SEPARATE
+  // secret from the session one. Required outside development.
+  linkConfirmationSecret: process.env.LINK_CONFIRMATION_SECRET || '',
+  // Transition only: lets the old `/app?token=<DASHBOARD_APP_TOKEN>` URL keep
+  // working (read-only: no replies, no cancellations). Default OFF, and it
+  // also needs LEGACY_DASHBOARD_TOKEN_UNTIL (ISO date) in the future.
+  legacyDashboardTokenEnabled: flag(process.env.LEGACY_DASHBOARD_TOKEN_ENABLED, false),
+  legacyDashboardTokenUntil: parseDate(process.env.LEGACY_DASHBOARD_TOKEN_UNTIL),
+  // Chatwoot webhook HMAC secrets (the "Secret" Chatwoot shows for the account
+  // webhook / agent bot). Verified against X-Chatwoot-Signature.
+  chatwootWebhookSigningSecret: process.env.CHATWOOT_WEBHOOK_SIGNING_SECRET || '',
+  chatwootAgentBotSigningSecret: process.env.CHATWOOT_AGENT_BOT_SIGNING_SECRET || '',
+  // Transition only: accept the old `?secret=` query string when no signing
+  // secret is configured (constant-time compare). Default OFF.
+  legacyWebhookQuerySecretEnabled: flag(process.env.LEGACY_WEBHOOK_QUERY_SECRET_ENABLED, false),
+  // Optional Slack-compatible incoming webhook URL for operational alerts
+  // (dedupe store down, audit writes failing, ...). Alerts are always logged.
+  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL || '',
 };
+
+function parseDate(raw: string | undefined): number | null {
+  if (!raw || !raw.trim()) return null;
+  const t = Date.parse(raw.trim());
+  return Number.isFinite(t) ? t : null;
+}
+
+/** True when the app runs outside local development / tests. */
+export function isProductionLike(): boolean {
+  const mode = (process.env.NODE_ENV || '').toLowerCase();
+  return mode !== 'development' && mode !== 'test';
+}
+
+/**
+ * Startup check for the signing secrets (no fallback derivation from other
+ * credentials). Throws outside development; in development, missing secrets
+ * are replaced by random per-process values (sessions don't survive restarts).
+ */
+export function assertSecuritySecrets(): void {
+  const problems: string[] = [];
+  for (const [name, value] of [
+    ['APP_SESSION_SECRET', env.appSessionSecret],
+    ['LINK_CONFIRMATION_SECRET', env.linkConfirmationSecret],
+  ] as const) {
+    if (!value) problems.push(`${name} is not set`);
+    else if (value.length < 32) problems.push(`${name} must be at least 32 characters`);
+  }
+  if (env.appSessionSecret && env.appSessionSecret === env.linkConfirmationSecret) {
+    problems.push('APP_SESSION_SECRET and LINK_CONFIRMATION_SECRET must differ');
+  }
+  if (problems.length === 0) return;
+  if (isProductionLike()) {
+    throw new Error(`Security configuration invalid: ${problems.join('; ')}`);
+  }
+  const random = () => randomBytes(32).toString('hex');
+  if (!env.appSessionSecret || env.appSessionSecret.length < 32) env.appSessionSecret = random();
+  if (!env.linkConfirmationSecret || env.linkConfirmationSecret.length < 32) {
+    env.linkConfirmationSecret = random();
+  }
+  console.warn(`[dev] ${problems.join('; ')} — using random per-process secrets`);
+}
+
+function flag(raw: string | undefined, fallback: boolean): boolean {
+  if (raw == null || raw.trim() === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}

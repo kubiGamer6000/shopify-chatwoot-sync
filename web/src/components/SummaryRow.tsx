@@ -23,7 +23,11 @@ export function SummaryRow({ profile }: { profile: CustomerProfile }) {
     },
     {
       label: 'Lifetime value',
-      value: formatMoney(summary.totalSpent, summary.currency),
+      // Per currency, net of refunds (currencies are never added together).
+      value:
+        summary.lifetimeValue && summary.lifetimeValue.length > 0
+          ? summary.lifetimeValue.map((v) => formatMoney(v.net, v.currency)).join(' + ')
+          : formatMoney(summary.totalSpent, summary.currency),
       icon: Wallet,
       iconClass: 'bg-success/10 text-success',
     },
@@ -62,7 +66,7 @@ export function SummaryRow({ profile }: { profile: CustomerProfile }) {
               <Icon className="size-3.5" />
             </div>
             <div>
-              <div className="truncate text-base font-semibold leading-tight">
+              <div className="truncate text-base font-semibold leading-tight" title={s.value}>
                 {s.value}
               </div>
               <div className="text-muted-foreground text-xs">{s.label}</div>

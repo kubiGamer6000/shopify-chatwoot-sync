@@ -64,7 +64,7 @@ stateDiagram-v2
 | | AgentBot | Draft |
 |---|---|---|
 | Endpoint | `POST /chatwoot/agent-bot` ([`agentBotWebhook.ts`](../src/routes/agentBotWebhook.ts)) | `POST /chatwoot` ([`chatwootWebhook.ts`](../src/routes/chatwootWebhook.ts)) |
-| Secret | `?secret=` `CHATWOOT_AGENT_BOT_SECRET` | `?secret=` `CHATWOOT_WEBHOOK_SECRET` |
+| Auth | HMAC `CHATWOOT_AGENT_BOT_SIGNING_SECRET` | HMAC `CHATWOOT_WEBHOOK_SIGNING_SECRET` |
 | Acts on status | `pending` | everything except `pending` |
 | Does | enqueue an AgentBot job | skip machine-generated mail; else `postAiDraft({ classify: true })` |
 | Idempotency | `wh-agentbot:<message id>`, 24h | `wh-draft:<message id>`, 24h |
@@ -293,7 +293,7 @@ Only `open` conversations; responds only when routed to the responder with every
 ## 13. Chatwoot setup
 
 1. Create labels: `ai-response`, `sub-cancelled-ai`, `sub-cancelled`, and the classification labels.
-2. **Settings → Bots → Add Agent Bot**: `https://<domain>/chatwoot/agent-bot?secret=<CHATWOOT_AGENT_BOT_SECRET>`.
+2. **Settings → Bots → Add Agent Bot**: `https://<domain>/chatwoot/agent-bot`; put the bot's secret in `CHATWOOT_AGENT_BOT_SIGNING_SECRET` (deliveries are HMAC-verified, see [security.md](security.md#5-webhooks)).
 3. Connect the bot to every inbox it should own.
-4. Keep the account `message_created` webhook: `https://<domain>/chatwoot?secret=<CHATWOOT_WEBHOOK_SECRET>`.
+4. Keep the account `message_created` webhook: `https://<domain>/chatwoot`, with its secret in `CHATWOOT_WEBHOOK_SIGNING_SECRET`.
 5. Make sure agents know the **Pending** tab exists.

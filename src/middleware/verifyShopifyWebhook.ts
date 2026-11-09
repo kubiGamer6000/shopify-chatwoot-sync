@@ -24,10 +24,10 @@ export function verifyShopifyWebhook(req: Request, res: Response, next: NextFunc
     .update(body)
     .digest('base64');
 
-  const isValid = crypto.timingSafeEqual(
-    Buffer.from(computed, 'utf8'),
-    Buffer.from(hmacHeader, 'utf8'),
-  );
+  const a = Buffer.from(computed, 'utf8');
+  const b = Buffer.from(hmacHeader, 'utf8');
+  // timingSafeEqual throws on a length mismatch; treat it as a failed check.
+  const isValid = a.length === b.length && crypto.timingSafeEqual(a, b);
 
   if (!isValid) {
     logger.warn('Webhook HMAC verification failed');
