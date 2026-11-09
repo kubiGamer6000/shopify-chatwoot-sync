@@ -1,5 +1,5 @@
 /** Appended to every autonomous AgentBot reply sent to the customer. */
-export const RESPONDER_SIGNATURE = 'Kind regards,\nScandi Support Team';
+export const RESPONDER_SIGNATURE = 'Kind regards,\nAndrew';
 
 /** Sign-off per customer language (classifier's English language name). */
 const LOCALIZED_SIGN_OFF: Record<string, string> = {
@@ -24,7 +24,7 @@ const LOCALIZED_SIGN_OFF: Record<string, string> = {
 /** The signature block for a customer language; English when unknown. */
 export function signatureFor(language?: string | null): string {
   const signOff = LOCALIZED_SIGN_OFF[(language ?? '').trim().toLowerCase()];
-  return signOff ? `${signOff},\nScandi Support Team` : RESPONDER_SIGNATURE;
+  return signOff ? `${signOff},\nAndrew` : RESPONDER_SIGNATURE;
 }
 
 /**

@@ -504,7 +504,9 @@ async function runResponderAgent(
           return `Successfully cancelled ${result.cancelled} active subscription(s). Confirm the cancellation to the customer with send_reply.`;
         }
         if (result.activeFound === 0) {
-          return 'No active subscription was found for this customer. Do not claim a cancellation. Use send_reply to tell the customer you could not find an active subscription on their account, or escalate if they insist.';
+          // Since the move to the new store, a subscription may live there, where this
+          // service cannot see it. Never tell the customer they have none.
+          return 'No active subscription was found in the legacy system, but it may exist in the new store, which you cannot see. Do not claim a cancellation and do not say they have no subscription. Call escalate_to_human now.';
         }
         return 'Active subscription(s) were found but the cancellation failed. Do not claim success — escalate to a human.';
       } catch (err) {
@@ -805,7 +807,7 @@ export async function processAgentBotConversation(
     ),
   });
   const { intents } = decision;
-  const reason =
+  let reason =
     autoReply.auto && decision.reason
       ? `${decision.reason}: ${autoReply.signals.join('; ')}`
       : decision.reason;
@@ -831,6 +833,14 @@ export async function processAgentBotConversation(
     if (!eligible) return finish({ ...base, action: 'skipped', reason: skipReason });
     const outcome = await runResponderAgent({ ...target, labels: intents, noEscalate: true });
     return finish({ ...base, ...outcome });
+  }
+
+  // Since the move to the new store, customers who bought there have no Shopify
+  // orders here, so the responder would answer blind. A person takes those.
+  if (decision.route === 'respond' && ctx.orders.length === 0) {
+    decision.route = 'acknowledge';
+    reason = 'no legacy order data (may be a new-store customer)';
+    base.route = 'acknowledge';
   }
 
   if (dryRun) {
